@@ -409,6 +409,7 @@ teamsAppServer.listen(appPort, () => {
             triggerProcessRun();
         } else {
             throw new Error(`\n[${new Date().toLocaleString()}] UiPath 인증 실패로 인해 에이전트를 시작할 수 없습니다.`);
+            process.exit(1);
         }
     })();
 
