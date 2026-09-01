@@ -136,7 +136,7 @@ class TeamsApp extends TeamsActivityHandler {
             const cleanText = removedMentionText ? removedMentionText.trim() : text;
             //console.log(`정제 메시지: '${cleanText}'`);
             
-            if (processTriggerKeywords.some(keyword => cleanText.replace(/\s/g, '').toUpperCase().includes(keyword))) {
+            if (processTriggerKeywords.some(keyword => cleanText.replace(/\s/g, '').toUpperCase().includes(keyword.toUpperCase()))) {
 
                 // 프로세스 큐에 추가한다.
                 PROCQUEUE.queue.enqueue({
