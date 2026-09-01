@@ -85,7 +85,7 @@ class MessageQueue {
             const postConfig = {
                 headers: {
                     'Content-Type': 'application/json',
-                    uipathWebhookFormat: uipathWebhookKey
+                    [uipathWebhookFormat]: uipathWebhookKey
                 }
             };
 
