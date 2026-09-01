@@ -91,39 +91,18 @@ class MessageQueue {
 
             axios.post(uipathWebhookUrl, postData, postConfig)
             .then(response => {
-                console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 1차 알림 성공.`);
+                console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 알림 성공.`);
             })
             .catch(error => {
                 if (error.response) {
-                    console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook 1차 알림 실패:`);
+                    console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook 알림 실패:`);
                     console.error(`   - Status: ${error.response.status}`);
                     console.error(`   - Data: ${JSON.stringify(error.response.data)}`);
                 } else {
-                    console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook 1차 알림 실패:`);
+                    console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook 알림 실패:`);
                     console.error(`   - Message: ${error.message}`);
                 }
             });
-
-            setTimeout(() => {
-                // 2차 알림 시도
-                axios.post(uipathWebhookUrl, postData, postConfig)
-                .then(response => {
-                    console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 2차 알림 성공.`);
-                })
-                .catch(error => {
-                    // 2차 알림도 실패할 경우 메시지를 큐에 추가
-                    this.queue.get(id).push(message);
-
-                    if (error.response) {
-                        console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook 2차 알림 실패:`);
-                        console.error(`   - Status: ${error.response.status}`);
-                        console.error(`   - Data: ${JSON.stringify(error.response.data)}`);
-                    } else {
-                        console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook 2차 알림 실패:`);
-                        console.error(`   - Message: ${error.message}`);
-                    }
-                });
-            }, uipathWebhookRetryAfter * 1000);
         } else {
             console.log('Webhook URL is empty!');
         }
