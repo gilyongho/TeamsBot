@@ -344,35 +344,24 @@ function triggerUipathTokenRenewal() {
 }
 
 async function runProcess(item) {
-    const availableRuntimes = await UIPATH.getAvailableRuntimes(app.uipathToken.token);
+    await app.createConversationAndSendMessage(item.id, appMessage2);
 
-    if (availableRuntimes >= requiredRuntimes) {  // runtime이 필요한 숫자 이상으로 확보되었을 때에만 실행한다.
-        await app.createConversationAndSendMessage(item.id, appMessage2);
-
-        const jobId = await UIPATH.runProcess(
-            app.uipathToken.token,
-            {
-                "g_polling_sec": pollingSec,
-                "g_task_owner_ids": taskOwnerIds,
-                "g_user_info": {
-                    id: item.id,
-                    name: item.name,
-                    email: item.email
-                },
-                "g_user_response": item.response
-            }
-        );
-
-        if (jobId) {
-            JOBTABLE.table.setJob(item.id, jobId);
+    const jobId = await UIPATH.runProcess(
+        app.uipathToken.token,
+        {
+            "g_polling_sec": pollingSec,
+            "g_task_owner_ids": taskOwnerIds,
+            "g_user_info": {
+                id: item.id,
+                name: item.name,
+                email: item.email
+            },
+            "g_user_response": item.response
         }
-    } else {
-        if (!item.notified) {
-            await app.createConversationAndSendMessage(item.id, appMessage4);
-            item.notified = true;
-        }
+    );
 
-        PROCQUEUE.queue.putBack(item);
+    if (jobId) {
+        JOBTABLE.table.setJob(item.id, jobId);
     }
 }
 
