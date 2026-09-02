@@ -66,16 +66,33 @@ schedulers are running. Before that, or after a token renewal fails, it returns
 
 ## Orchestrator URL path
 
-The documented OData path is `{domain}/{org}/{tenant}/orchestrator_/odata/...`, but this
-deployment reaches Orchestrator **without** the `orchestrator_` segment — `StartJobs` and
-`getJobState` both work against `https://as.lgcnsrpa.com/innotek/DefaultTenant/odata/...`.
-The identity endpoint does use its suffix (`/identity_/connect/token`), so the ingress is
-asymmetric.
+The canonical path is `{domain}/{org}/{tenant}/{service}/odata/...`, where `{service}` is
+`orchestrator_`, `dataservice_` and so on. This deployment also routes to Orchestrator
+*without* the service segment, and that is the form currently in production.
 
-`UiPathOrchestratorPath` defaults to empty, preserving that behaviour exactly. **Do not
-"correct" the URL in code.** If Orchestrator calls start returning 404 after a platform
-upgrade or an ingress change, set `UiPathOrchestratorPath="orchestrator_"` in `.env` — no
-code change needed.
+Both forms are genuinely valid here — measured 2026-09-02 against `as.lgcnsrpa.com`:
+
+| Path under `/innotek/DefaultTenant` | Status | Reading |
+|---|---|---|
+| `odata/Jobs` | 401 | reaches Orchestrator, only auth missing |
+| `orchestrator_/odata/Jobs` | 401 | same |
+| `bogus_/odata/Jobs` | 302 | unknown service falls through to the portal |
+| `orchestrator_/odata/NoSuchEntity` | 404 | routed to Orchestrator, entity unknown |
+
+`bogus_` returning 302 rather than 401 shows the auth gate is not in front of routing, so
+the 401s mean the path resolved. The 8/31 production log independently confirms the
+service-less form: `StartJobs` returned 201 with a job id.
+
+`UiPathOrchestratorPath` defaults to empty so that deploying this branch does not change
+any URL. **Do not hard-code the segment back into the five call sites.** To move to the
+canonical form, verify in staging and then set one line in `.env`:
+
+```
+UiPathOrchestratorPath="orchestrator_"
+```
+
+The same line restores service if a platform upgrade ever stops accepting the
+service-less form. Re-run the table above to re-diagnose.
 
 ## Trigger keywords
 

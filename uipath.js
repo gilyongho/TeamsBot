@@ -25,14 +25,25 @@ const longNameLength = process.env.LongNameLength || 36;
 
 // Orchestrator OData 의 기본 경로.
 //
-//   문서상 경로는  {도메인}/{org}/{tenant}/orchestrator_/odata/...  이지만,
-//   이 배포(as.lgcnsrpa.com)의 ingress 는 orchestrator_ 없이도 라우팅한다.
-//   StartJobs(201) · getJobState 가 운영에서 정상 동작하는 것으로 확인됨.
-//   (identity_ 는 붙는데 orchestrator_ 는 안 붙는 비대칭 구성이다)
+//   정규 구조는  {도메인}/{org}/{tenant}/{service}/odata/...  이고
+//   {service} 는 orchestrator_ · dataservice_ 처럼 서비스를 가리킨다.
 //
-//   기본값 '' 는 현재 동작을 그대로 유지한다. 플랫폼 업그레이드나 ingress 변경으로
-//   404 가 나기 시작하면 .env 에 UiPathOrchestratorPath="orchestrator_" 만 넣으면 된다.
-//   코드를 고치지 않아도 되도록 설정으로 빼 둔다.
+//   그런데 이 배포(as.lgcnsrpa.com)는 {service} 없이도 Orchestrator 로 라우팅한다.
+//   2026-09-02 확인 결과:
+//
+//     /innotek/DefaultTenant/odata/Jobs                    → 401  (도달, 인증만 없음)
+//     /innotek/DefaultTenant/orchestrator_/odata/Jobs      → 401  (동일)
+//     /innotek/DefaultTenant/bogus_/odata/Jobs             → 302  (미인식 서비스 → 포털)
+//     /innotek/DefaultTenant/orchestrator_/odata/NoSuchEntity → 404
+//
+//   bogus_ 가 401 이 아니라 302 이므로 인증 게이트가 앞단에 있는 것이 아니다.
+//   즉 위 401 은 "경로가 유효하다"는 신호이고, 두 형태 모두 실제로 유효하다.
+//   운영에서도 {service} 없는 형태로 StartJobs 가 201 을 받는다(8/31 로그).
+//
+//   기본값을 '' 로 두는 이유: 운영 중인 시스템의 URL 5개를 한꺼번에 바꾸지 않기
+//   위해서다. 정규 형태로 가려면 스테이징에서 확인한 뒤 .env 에 한 줄만 넣으면 된다.
+//     UiPathOrchestratorPath="orchestrator_"
+//   플랫폼 업그레이드로 {service} 없는 형태가 막히면 같은 한 줄로 복구된다.
 const uipathOrchestratorPath = process.env.UiPathOrchestratorPath || '';
 
 // {base}/{org}/{tenant}[/{orchestratorPath}]
