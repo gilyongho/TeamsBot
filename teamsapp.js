@@ -45,6 +45,35 @@ const appMessage3 = process.env.AppMessage3 || '';
 const appMessage4 = process.env.AppMessage4 || '';
 const appMessage5 = process.env.AppMessage5 || '';
 
+// [D-15] 실행 중인 Job이 있을 때 트리거 키워드를 재시작으로 처리할지 여부.
+//   기존 동작은 appMessage5로 거부하고 입력을 버렸다. 그런데 사용자가 트리거를
+//   입력하는 상황은 대개 이전 Job이 응답을 기다리며 살아 있는 상황이므로,
+//   정작 재시작이 필요한 순간에 거부되는 문제가 있었다.
+//   false로 두면 종전 동작으로 되돌아간다.
+const restartOnTrigger = String(process.env.RestartOnTrigger ?? 'true').toLowerCase() !== 'false';
+
+// [D-15] Job 중지 방식. Kill = 즉시, SoftStop = 프로세스의 정지 지점까지 대기.
+//   대화형 에이전트는 사용자 입력 대기 중 정지 지점에 도달하지 못할 수 있어 Kill이 기본값.
+const stopStrategy = process.env.JobStopStrategy || 'Kill';
+
+// [D-15] 재시작 안내 메시지
+const appMessage6 = process.env.AppMessage6
+    || '진행 중이던 작업을 종료하고 처음부터 다시 시작합니다.<br>잠시만 기다려주세요.';
+
+// [D-8] Job 상태 조회 연속 실패 허용 횟수
+const maxStateCheckRetry = Number(process.env.MaxStateCheckRetry || 3);
+
+// [D-15] 중지 후 실제 종료 확인 폴링
+const STOP_CONFIRM_TRIES = 5;
+const STOP_CONFIRM_INTERVAL_MS = 1000;
+
+// [D-8] tryProcessRun 동시 실행 가드.
+//   onMessage와 setInterval 양쪽에서 호출되므로 await 구간에서 겹칠 수 있다.
+let processRunInFlight = false;
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const isTerminal = (state) => ['FAULTED', 'SUCCESSFUL', 'STOPPED'].includes(String(state).toUpperCase());
+
 // API Key Authentication
 const apiKeyAuth = (req, res, next) => {
     const clientKey = req.headers['x-api-key'];
@@ -111,6 +140,7 @@ class TeamsApp extends TeamsActivityHandler {
         super();
 
         this.uipathToken = null; // UiPath 인증 토큰 (JSON 객체)
+        this.ready = false; // [D-10] UiPath 연동 준비 완료 여부 (헬스체크용)
         this.conversationReference = null; // 대화 참조 정보
 
         // 메시지 수신 핸들러
@@ -334,8 +364,11 @@ function triggerUipathTokenRenewal() {
             const newToken = await UIPATH.getAccessToken();
             if (newToken) {
                 app.uipathToken = newToken;
+                app.ready = true;
                 console.log(`[${new Date().toLocaleString()}] ✅ UiPath 인증 토큰 갱신 성공.\n`);
             } else {
+                // [D-10] 갱신 실패 상태를 헬스체크에 반영한다.
+                app.ready = false;
                 console.error(`[${new Date().toLocaleString()}] ❌ UiPath 인증 토큰 갱신 실패.\n`);
             }
         },
@@ -366,31 +399,126 @@ async function runProcess(item) {
 }
 
 async function tryProcessRun() {
+
+    // [D-8] 동시 실행 가드
+    if (processRunInFlight) {
+        return;
+    }
     if (PROCQUEUE.queue.isEmpty()) {
         return;
     }
 
-    const item = PROCQUEUE.queue.dequeue();
-    if (item) {
+    processRunInFlight = true;
+    try {
+        const item = PROCQUEUE.queue.dequeue();
+        if (!item) {
+            console.log('Something strange...');
+            return;
+        }
+
         const jobId = JOBTABLE.table.getJob(item.id);
-        if (jobId) {
-            const state = await UIPATH.getJobState(app.uipathToken.token, jobId);
-            if (state) {
-                if (['FAULTED', 'SUCCESSFUL', 'STOPPED'].includes(state.toUpperCase())) {
-                    await runProcess(item);
+
+        // 등록된 Job이 없으면 그대로 기동한다.
+        if (!jobId) {
+            await runProcess(item);
+            return;
+        }
+
+        const state = await UIPATH.getJobState(app.uipathToken.token, jobId);
+
+        // ── [D-8] 상태 조회 실패 ──────────────────────────────
+        // 이전 Job이 실제로 살아 있는지 모르는 채로 새 Job을 기동하면
+        // 같은 대화에 두 에이전트가 붙는다. 기동을 보류하고 재시도한다.
+        if (!state) {
+            item.stateCheckRetry = (item.stateCheckRetry || 0) + 1;
+
+            if (item.stateCheckRetry < maxStateCheckRetry) {
+                console.error(
+                    `[${new Date().toLocaleString()}] ⚠️ Job ${jobId} 상태 확인 실패 ` +
+                    `(${item.stateCheckRetry}/${maxStateCheckRetry}). 기동을 보류하고 재시도합니다.`);
+                PROCQUEUE.queue.putBack(item);
+                return;
+            }
+
+            // 임계치 초과 — 영구 정지를 막기 위해 기동을 허용한다.
+            console.error(
+                `[${new Date().toLocaleString()}] ⚠️ Job ${jobId} 상태를 ${maxStateCheckRetry}회 ` +
+                `확인하지 못했습니다. 중복 실행 위험을 감수하고 새 Job을 기동합니다.`);
+            JOBTABLE.table.deleteJob(item.id);
+            await runProcess(item);
+            return;
+        }
+
+        item.stateCheckRetry = 0;
+
+        // ── [D-4] 이전 Job이 이미 종료됨 ──────────────────────
+        if (isTerminal(state)) {
+            JOBTABLE.table.deleteJob(item.id);
+            await runProcess(item);
+            return;
+        }
+
+        // ── 이전 Job이 실행 중 ────────────────────────────────
+        if (!restartOnTrigger) {
+            console.log(`Job ${jobId} is in '${state}' state. Not allowed to run a new job.`);
+            await app.createConversationAndSendMessage(item.id, appMessage5);
+            return;
+        }
+
+        // ── [D-15] 기존 Job을 중지하고 새로 기동한다 ──────────
+        if (!item.stopRequested) {
+            console.log(`[${new Date().toLocaleString()}] 재시작 요청 — Job ${jobId} 중지를 시도합니다.`);
+
+            const stopped = await UIPATH.stopJob(app.uipathToken.token, jobId, stopStrategy);
+
+            if (!stopped) {
+                item.restartRetry = (item.restartRetry || 0) + 1;
+
+                if (item.restartRetry < 3) {
+                    console.error(
+                        `[${new Date().toLocaleString()}] ⚠️ Job ${jobId} 중지 실패 ` +
+                        `(${item.restartRetry}/3). 재시도합니다.`);
+                    PROCQUEUE.queue.putBack(item);   // 메시지를 버리지 않는다
                 } else {
-                    console.log(`Job ${jobId} is in '${state}' state. Not allowed to run a new job.`);
+                    console.error(`[${new Date().toLocaleString()}] ❌ Job ${jobId} 중지를 3회 실패했습니다.`);
                     await app.createConversationAndSendMessage(item.id, appMessage5);
                 }
-            } else {  // job의 상태를 얻어오지 못하면 새 job을 실행시켜주기로 한다.
-                console.log(`Job ${jobId} is in UNKNOWN state. Allow running a new job.`);
-                await runProcess(item);
+                return;
             }
-        } else {
-            await runProcess(item);
+
+            item.stopRequested = true;
         }
-    } else {
-        console.log('Something strange...');
+
+        if (!item.restartNotified) {
+            await app.createConversationAndSendMessage(item.id, appMessage6);
+            item.restartNotified = true;
+        }
+
+        // 종료가 실제로 반영될 때까지 짧게 확인한다.
+        // 확인 없이 곧바로 기동하면 같은 대화에 두 Job이 붙는 상황이 재현될 수 있다.
+        let confirmed = false;
+        for (let i = 0; i < STOP_CONFIRM_TRIES; i++) {
+            await sleep(STOP_CONFIRM_INTERVAL_MS);
+            const s = await UIPATH.getJobState(app.uipathToken.token, jobId);
+            if (!s || isTerminal(s)) {
+                confirmed = true;
+                break;
+            }
+        }
+
+        if (!confirmed) {
+            console.error(
+                `[${new Date().toLocaleString()}] ⚠️ Job ${jobId}가 아직 종료되지 않았습니다. ` +
+                `다음 주기에 다시 확인합니다.`);
+            PROCQUEUE.queue.putBack(item);
+            return;
+        }
+
+        JOBTABLE.table.deleteJob(item.id);
+        await runProcess(item);
+
+    } finally {
+        processRunInFlight = false;
     }
 }
 
@@ -399,29 +527,40 @@ function triggerProcessRun() {
 }
 
 // Start Teams App REST server
-teamsAppServer.listen(appPort, () => {
-    (async () => {
-        app.uipathToken = await UIPATH.getAccessToken();
-
-        if (app.uipathToken) {
-            console.log(`\n[${new Date().toLocaleString()}] UiPath와의 통신 준비 완료.\n`);
-            triggerUipathTokenRenewal();
-            triggerProcessRun();
-        } else {
-            throw new Error(`\n[${new Date().toLocaleString()}] UiPath 인증 실패로 인해 에이전트를 시작할 수 없습니다.`);
-            process.exit(1);
-        }
-    })();
+teamsAppServer.listen(appPort, async () => {
 
     console.log(`\nApp ID: ${appId}`);
     console.log(`App Password: ${appPassword.substring(0, 8)}...`);
     console.log(`Tenant ID: ${appTenantId}`);
 
     console.log(`\nTeams App listening to ${teamsAppServer.url}`);
+
+    // [D-10] 종전 코드는 async IIFE 안에서 throw 한 뒤 process.exit(1)을 두었다.
+    //   throw 뒤의 줄은 실행되지 않으므로 그 exit는 죽은 코드였고, 종료는 Node의
+    //   기본 unhandled-rejection 동작에 의존하고 있었다. 전역 핸들러를 추가하면
+    //   그 기본 동작이 사라져 포트만 열린 채 아무 일도 하지 않는 상태가 된다.
+    app.uipathToken = await UIPATH.getAccessToken();
+
+    if (!app.uipathToken) {
+        console.error(
+            `[${new Date().toLocaleString()}] ❌ UiPath 인증 실패로 인해 에이전트를 시작할 수 없습니다.`);
+        process.exit(1);   // systemd Restart=on-failure 가 재시도한다
+        return;
+    }
+
+    console.log(`\n[${new Date().toLocaleString()}] UiPath와의 통신 준비 완료.\n`);
+    triggerUipathTokenRenewal();
+    triggerProcessRun();
+    app.ready = true;
 });
 
 // Teams App 헬스체크 엔드포인트
 teamsAppServer.get('/', async (req, res) => {
+    // [D-10] 종전에는 어떤 상황에서도 200을 반환해 준비되지 않은 상태를 감지할 수 없었다.
+    if (!app.ready || !app.uipathToken) {
+        res.send(503, 'UiPath 연동이 준비되지 않았습니다.');
+        return;
+    }
     res.send('에이전트가 실행 중입니다.');
 });
 
