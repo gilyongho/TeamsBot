@@ -375,7 +375,11 @@ function triggerUipathTokenRenewal() {
 }
 
 async function runProcess(item) {
-    await app.createConversationAndSendMessage(item.id, appMessage2);
+    // [D-15] 재시작 안내(appMessage6)를 이미 보냈다면 준비 안내를 중복해서 보내지 않는다.
+    //   "종료하고 다시 시작합니다" 직후 "진행중인지 확인중입니다" 가 이어지면 혼란스럽다.
+    if (!item.restartNotified) {
+        await app.createConversationAndSendMessage(item.id, appMessage2);
+    }
 
     const jobId = await UIPATH.runProcess(
         app.uipathToken.token,
@@ -393,6 +397,10 @@ async function runProcess(item) {
 
     if (jobId) {
         JOBTABLE.table.setJob(item.id, jobId);
+    } else {
+        // 기동 실패 시 종전에는 아무 안내가 없어 사용자가 "준비중입니다" 상태로 방치됐다.
+        console.error(`[${new Date().toLocaleString()}] ❌ 프로세스 기동 실패. 사용자에게 안내합니다.`);
+        await app.createConversationAndSendMessage(item.id, appMessage1);
     }
 }
 
