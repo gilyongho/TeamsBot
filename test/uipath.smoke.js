@@ -91,6 +91,19 @@ const check = (name, cond, detail = '') => {
                        + '/odata/Jobs/UiPath.Server.Configuration.OData.StopJobs',
         captured.url);
 
+    console.log('\n[6] 모든 HTTP 호출에 타임아웃이 설정됨');
+    captured = null; shouldFail = false;
+    await UIPATH.stopJob('tok', 1);
+    check('stopJob 에 timeout', typeof captured.cfg.timeout === 'number' && captured.cfg.timeout > 0,
+        JSON.stringify(captured.cfg.timeout));
+    {
+        const src = require('fs').readFileSync(path.join(ROOT, 'uipath.js'), 'utf8');
+        const calls = (src.match(/axios\.(post|get)\(/g) || []).length;
+        const timeouts = (src.match(/timeout: uipathHttpTimeout/g) || []).length;
+        check(`axios 호출 ${calls}건 전부에 timeout (${timeouts}건)`, calls === timeouts,
+            `호출 ${calls} / timeout ${timeouts}`);
+    }
+
     console.log(`\n결과: ${pass} 통과 / ${fail} 실패\n`);
     process.exit(fail ? 1 : 0);
 })();

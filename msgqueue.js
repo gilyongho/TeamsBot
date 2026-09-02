@@ -23,6 +23,10 @@ const uipathWebhookRetryAfter = process.env.UiPathWebhookRetryAfter || 1;
 // (/dequeue 폴링은 webhook 도입으로 사용되지 않는다 — 잔재를 남겨두되 제한한다)
 const MAX_QUEUE_PER_USER = Number(process.env.MaxQueuePerUser || 20);
 
+// HTTP 타임아웃. axios 기본값 0(무한)이면 응답 없는 소켓 하나가 해당 사용자의
+// 전송 체인을 영구히 막는다. 그 사용자는 이후 아무 메시지도 전달되지 않는다.
+const webhookHttpTimeout = Number(process.env.WebhookHttpTimeoutMs || 15000);
+
 // API Key Authentication
 const apiKeyAuth = (req, res, next) => {
     const clientKey = req.headers['x-api-key'];
@@ -80,6 +84,16 @@ class MessageQueue {
         this.onDeliveryFailure = fn;
     }
 
+    // 큐 적재는 반드시 상한을 거쳐야 한다. 소비하는 주체가 없으므로
+    // 상한 없는 경로가 하나라도 있으면 그 경로로 무한히 자란다.
+    _pushCapped(id, message) {
+        const q = this.queue.get(id);
+        q.push(message);
+        while (q.length > MAX_QUEUE_PER_USER) {
+            q.shift();
+        }
+    }
+
     isEmpty(id) {
         if (!this.queue.has(id)) {
             return true;
@@ -104,8 +118,10 @@ class MessageQueue {
 
         // Webhook 미설정 시에도 메시지를 잃지 않도록 큐에 적재한다.
         if (!uipathWebhookUrl) {
-            console.log(`[${new Date().toLocaleString()}] Webhook URL is empty! 메시지를 큐에 적재합니다.`);
-            this.queue.get(id).push(message);
+            console.error(
+                `[${new Date().toLocaleString()}] ❌ UiPathWebhookUrl 이 설정되지 않았습니다. ` +
+                `메시지가 전달되지 않습니다.`);
+            this._pushCapped(id, message);
             return;
         }
 
@@ -127,6 +143,7 @@ class MessageQueue {
         };
 
         const postConfig = {
+            timeout: webhookHttpTimeout,
             headers: {
                 'Content-Type': 'application/json',
                 [uipathWebhookFormat]: uipathWebhookKey
@@ -156,6 +173,15 @@ class MessageQueue {
         // 1차가 실패한 경우에만 재시도한다.
         await new Promise(r => setTimeout(r, Number(uipathWebhookRetryAfter) * 1000));
 
+        // 대기하는 동안 /reset 이 호출됐다면 이 메시지는 이전 세션의 것이다.
+        // 그대로 재전송하면 방금 시작된 새 세션이 지난 대화의 답변을 받는다.
+        if (this.generation.get(id) !== gen) {
+            console.error(
+                `[${new Date().toLocaleString()}] ⚠️ 재시도 직전 세션이 초기화되어 전송을 취소합니다. ` +
+                `[msg:${messageId}]`);
+            return;
+        }
+
         try {
             await axios.post(uipathWebhookUrl, postData, postConfig);
             console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 2차 알림 성공. [msg:${messageId}]`);
@@ -174,11 +200,7 @@ class MessageQueue {
 
         // 큐에는 남겨 두되(폴링 backstop 이 살아 있을 경우 대비) 상한을 둔다.
         // 소비되지 않는 큐가 무한히 자라지 않도록.
-        const q = this.queue.get(id);
-        q.push(message);
-        if (q.length > MAX_QUEUE_PER_USER) {
-            q.shift();
-        }
+        this._pushCapped(id, message);
 
         // 사용자에게 알린다. 이것이 실질적인 복구 경로다.
         console.error(
@@ -230,11 +252,20 @@ const serverOptions = {
 };
 //const msgQueueServer = restify.createServer();  // HTTP 서버
 const msgQueueServer = restify.createServer(serverOptions);  // HTTPS 서버
-msgQueueServer.use(restify.plugins.bodyParser());
+// bodyParser 는 use() 로 등록되어 apiKeyAuth 보다 먼저 실행된다.
+// restify 11 의 기본 maxBodySize 는 0(무제한)이라, 미인증 요청 하나로도
+// 본문 전체가 메모리에 적재된다. 상한을 둔다.
+msgQueueServer.use(restify.plugins.bodyParser({ maxBodySize: 64 * 1024 }));
 
 // Message Queue 헬스체크 엔드포인트
 msgQueueServer.get('/', apiKeyAuth, async (req, res) => {
-    msgQueue.print();
+    // print() 는 모든 사용자의 큐 내용(= 대화 원문)을 로그로 덤프한다.
+    // 헬스체크를 주기적으로 호출하면 저널이 채팅 전문으로 가득 찬다. 요약만 남긴다.
+    let total = 0;
+    msgQueue.queue.forEach(v => { total += v.length; });
+    console.log(
+        `[${new Date().toLocaleString()}] Message Queue 상태: ` +
+        `사용자 ${msgQueue.queue.size}명 / 미전달 ${total}건`);
     res.send('Message Queue 서버가 실행 중입니다.');
 });
 
@@ -246,7 +277,11 @@ msgQueueServer.listen(msgPort, () => {
 
 // Reset message queue for specified user
 msgQueueServer.post('/reset', apiKeyAuth, async (req, res) => {
-    const id = req.body.id;
+    const id = req.body && req.body.id;
+    if (!id) {
+        res.send(400, 'id 필드가 필요합니다.');
+        return;
+    }
     msgQueue.reset(id);
     console.log(`[${new Date().toLocaleString()}] Message Queue ${id}가 초기화되었습니다.`);
     res.send(`Message Queue ${id}가 초기화되었습니다.`);
@@ -254,7 +289,11 @@ msgQueueServer.post('/reset', apiKeyAuth, async (req, res) => {
 
 // Retrieve a message (polling)
 msgQueueServer.post('/dequeue', apiKeyAuth, async (req, res) => {
-    const id = req.body.id;
+    const id = req.body && req.body.id;
+    if (!id) {
+        res.send(400, 'id 필드가 필요합니다.');
+        return;
+    }
     const message = msgQueue.dequeue(id);
     if (message) {
         console.log(`[${new Date().toLocaleString()}] Dequeued message: ${message}`);

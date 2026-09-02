@@ -18,7 +18,13 @@ const uipathTenantName = process.env.UiPathTenantName || '';
 const uipathFolderId = process.env.UiPathFolderId || '';
 const uipathProcessName = process.env.UiPathProcessName || '';
 const uipathQueueName = process.env.UiPathQueueName || '';
-const uipathAuthScope = 'OR.Administration OR.Administration.Read OR.Administration.Write OR.Analytics OR.Analytics.Read OR.Analytics.Write OR.Assets OR.Assets.Read OR.Assets.Write OR.Audit OR.Audit.Read OR.Audit.Write OR.AutomationSolutions.Access OR.BackgroundTasks OR.BackgroundTasks.Read OR.BackgroundTasks.Write OR.Execution OR.Execution.Read OR.Execution.Write OR.Folders OR.Folders.Read OR.Folders.Write OR.Hypervisor OR.Hypervisor.Read OR.Hypervisor.Write OR.Jobs OR.Jobs.Read OR.Jobs.Write OR.License OR.License.Read OR.License.Write OR.Machines OR.Machines.Read OR.Machines.Write OR.ML OR.ML.Read OR.ML.Write OR.Monitoring OR.Monitoring.Read OR.Monitoring.Write OR.Queues OR.Queues.Read OR.Queues.Write OR.Robots OR.Robots.Read OR.Robots.Write OR.Settings OR.Settings.Read OR.Settings.Write OR.Tasks OR.Tasks.Read OR.Tasks.Write OR.TestDataQueues OR.TestDataQueues.Read OR.TestDataQueues.Write OR.TestSetExecutions OR.TestSetExecutions.Read OR.TestSetExecutions.Write OR.TestSets OR.TestSets.Read OR.TestSets.Write OR.TestSetSchedules OR.TestSetSchedules.Read OR.TestSetSchedules.Write OR.Users OR.Users.Read OR.Users.Write OR.Webhooks OR.Webhooks.Read OR.Webhooks.Write';
+// 요청 스코프.
+//   기본값은 기존 동작 유지를 위해 전체 스코프다. 그러나 이 코드가 실제로 쓰는 것은
+//   StartJobs · Jobs({id}) · StopJobs · Machines 뿐이므로, 자격증명 유출 시 폭발 반경을
+//   줄이려면 .env 에 아래 한 줄만 넣으면 된다.
+//     UiPathAuthScope="OR.Jobs OR.Jobs.Read OR.Jobs.Write OR.Machines.Read OR.Monitoring"
+//   스코프를 좁히면 토큰 발급부터 실패하므로 스테이징에서 먼저 확인할 것.
+const uipathAuthScope = process.env.UiPathAuthScope || 'OR.Administration OR.Administration.Read OR.Administration.Write OR.Analytics OR.Analytics.Read OR.Analytics.Write OR.Assets OR.Assets.Read OR.Assets.Write OR.Audit OR.Audit.Read OR.Audit.Write OR.AutomationSolutions.Access OR.BackgroundTasks OR.BackgroundTasks.Read OR.BackgroundTasks.Write OR.Execution OR.Execution.Read OR.Execution.Write OR.Folders OR.Folders.Read OR.Folders.Write OR.Hypervisor OR.Hypervisor.Read OR.Hypervisor.Write OR.Jobs OR.Jobs.Read OR.Jobs.Write OR.License OR.License.Read OR.License.Write OR.Machines OR.Machines.Read OR.Machines.Write OR.ML OR.ML.Read OR.ML.Write OR.Monitoring OR.Monitoring.Read OR.Monitoring.Write OR.Queues OR.Queues.Read OR.Queues.Write OR.Robots OR.Robots.Read OR.Robots.Write OR.Settings OR.Settings.Read OR.Settings.Write OR.Tasks OR.Tasks.Read OR.Tasks.Write OR.TestDataQueues OR.TestDataQueues.Read OR.TestDataQueues.Write OR.TestSetExecutions OR.TestSetExecutions.Read OR.TestSetExecutions.Write OR.TestSets OR.TestSets.Read OR.TestSets.Write OR.TestSetSchedules OR.TestSetSchedules.Read OR.TestSetSchedules.Write OR.Users OR.Users.Read OR.Users.Write OR.Webhooks OR.Webhooks.Read OR.Webhooks.Write';
 //const uipathAuthScope = 'OR.Jobs OR.Machines OR.Monitoring';
 const uipathASRobotName = process.env.UiPathASRobotName || '[Default] Automation Suite Robot';
 const longNameLength = process.env.LongNameLength || 36;
@@ -45,6 +51,12 @@ const longNameLength = process.env.LongNameLength || 36;
 //     UiPathOrchestratorPath="orchestrator_"
 //   플랫폼 업그레이드로 {service} 없는 형태가 막히면 같은 한 줄로 복구된다.
 const uipathOrchestratorPath = process.env.UiPathOrchestratorPath || '';
+
+// HTTP 타임아웃.
+//   axios 기본값은 0(무한 대기)이다. TCP 는 붙었는데 응답이 오지 않는 상태
+//   (ingress 장애·failover·half-open NAT)에서 프라미스가 영원히 settle 되지 않으면
+//   tryProcessRun 의 finally 가 실행되지 않아 스케줄러가 통째로 잠긴다.
+const uipathHttpTimeout = Number(process.env.UiPathHttpTimeoutMs || 15000);
 
 // {base}/{org}/{tenant}[/{orchestratorPath}]
 function odataBase() {
@@ -73,7 +85,7 @@ async function getAccessToken() {
 
         console.log(`\n[${new Date().toLocaleString()}] UiPath 인증 토큰 요청 중...`);
 
-        const response = await axios.post(apiUrl, params);
+        const response = await axios.post(apiUrl, params, { timeout: uipathHttpTimeout });
 
         const accessToken = response.data.access_token;
         const expiresIn = response.data.expires_in; // 만료 시간(초)
@@ -82,7 +94,6 @@ async function getAccessToken() {
         console.log(`[${new Date().toLocaleString()}] ✅ UiPath 인증 토큰 가져오기 성공:`);
         console.log(`   - Token Type: ${tokenType}`);
         console.log(`   - Expires In: ${expiresIn} 초`);
-        console.log(`   - Access Token: ${accessToken.substring(0, 20)}...`); // 보안을 위하여 토큰 일부만 출력
 
         cachedTokenObj = {
             token: accessToken,
@@ -134,6 +145,7 @@ async function runProcess(token, inputArguments) {
     try {
 
         const response = await axios.post(apiUrl, jobPayload, {
+            timeout: uipathHttpTimeout,
             headers: {
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json',
@@ -188,6 +200,7 @@ async function getAvailableRuntimes(token) {
 
         const machineUrl = `${odataBase()}/odata/Machines`;
         const machineRes = await axios.get(machineUrl, {
+            timeout: uipathHttpTimeout,
             params: {
                 $filter: `Name eq '${uipathASRobotName}'`
             },
@@ -214,6 +227,7 @@ async function getAvailableRuntimes(token) {
 
         const jobsUrl = `${odataBase()}/odata/Jobs`;
         const jobsRes = await axios.get(jobsUrl, {
+            timeout: uipathHttpTimeout,
             params: {
                 //$filter: `State eq 'Running' and HostMachineName eq ${MACHINE_NAME}`
                 $filter: `State eq 'Running'`,
@@ -264,6 +278,7 @@ async function getJobState(token, jobId) {
 
     try {
         const response = await axios.get(apiUrl, {
+            timeout: uipathHttpTimeout,
             headers: {
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json',
@@ -317,6 +332,7 @@ async function stopJob(token, jobId, strategy = 'Kill') {
 
     try {
         await axios.post(apiUrl, payload, {
+            timeout: uipathHttpTimeout,
             headers: {
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json',

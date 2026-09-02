@@ -5,7 +5,8 @@ export default [{
     sourceType: "commonjs",
     globals: { require:"readonly", module:"writable", process:"readonly", console:"readonly",
                __dirname:"readonly", Buffer:"readonly", setTimeout:"readonly",
-               setInterval:"readonly", clearTimeout:"readonly", URL:"readonly" }
+               setInterval:"readonly", clearTimeout:"readonly", clearInterval:"readonly",
+               URL:"readonly", URLSearchParams:"readonly", crypto:"readonly" }
   },
   rules: {
     "no-undef": "error",

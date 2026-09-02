@@ -61,8 +61,16 @@ schedulers are running. Before that, or after a token renewal fails, it returns
 - Global `unhandledRejection` / `uncaughtException` handlers are installed in
   `main.js` before the requires. Keep them there — they are what makes async
   failures visible in the journal.
-- Set `RestartOnTrigger=false` to restore the previous behaviour where a trigger
-  keyword typed during a running job is refused instead of restarting it.
+- `RestartOnTrigger` defaults to **false**, because `stopJob()` has never run against a real
+  Orchestrator. Verify it in staging (test T-5), then set `RestartOnTrigger=true`. Until then a
+  trigger typed during a running job is refused rather than restarting it.
+- Every outbound HTTP call has a timeout (`UiPathHttpTimeoutMs`, `WebhookHttpTimeoutMs`).
+  Axios defaults to waiting forever; a socket that connects and never answers would otherwise
+  leave `processRunInFlight` set and stop the scheduler for **every** user while `GET /` still
+  returned 200. `ProcessRunWatchdogMs` is the backstop for that: the guard is released and the
+  health check drops to 503 so the condition is visible.
+- A failed token renewal retries every `TokenRecoveryIntervalSec` instead of waiting out the
+  ~59 minute renewal period.
 
 ## Message delivery and the vestigial queue
 
@@ -122,6 +130,8 @@ and starts over. Keep them to explicit start phrases.
 
 | Item | Note |
 |---|---|
+| Both HTTP ports bind `0.0.0.0` | `bodyParser` runs before `apiKeyAuth`, so an unauthenticated request's body is buffered before the 403. Body size is now capped (64 KB / 256 KB), but the ports should still be firewalled to the Bot Framework and UiPath source ranges. |
+| UiPath OAuth scope | `uipath.js` requests ~60 scopes including `*.Write` on Administration, Users, Machines and Settings; the code only uses StartJobs, `Jobs({id})`, StopJobs and Machines. Narrow it with `UiPathAuthScope` once verified in staging — a leaked credential currently reaches the whole tenant. |
 | `restify` 11 → 12 | Two high-severity advisories (incl. `find-my-way` ReDoS) need this major upgrade. Not applied here: both HTTPS servers and `bodyParser` sit on restify and need a regression pass. |
 | `conversationReference` | A single instance field shared by every user (`teamsapp.js`). Works in a single tenant because `serviceUrl` and the bot identity are constant, but it should be a `Map<userId, ref>`. `sendMessageToCurrentUser()` would deliver to whoever messaged last; it currently has no caller. |
 | Trigger typos | Matching is exact-substring after whitespace removal and case folding, so transposition typos (`이에전트` for `에이전트`) still miss. Listing variants does not scale — an Adaptive Card button is the real fix, and needs manifest and Maestro-side changes. |

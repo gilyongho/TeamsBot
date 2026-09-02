@@ -159,6 +159,40 @@ const check = (name, cond, detail = '') => {
             JSON.stringify(queued('u4')));
     }
 
+    console.log('\n[8] 재시도 직전 세션이 초기화되면 이전 세션 답변을 배달하지 않음');
+    {
+        let n = 0;
+        const delivered = [];
+        const saved = axiosMock.post;
+        axiosMock.post = (url, data) => {
+            n++;
+            if (n === 1) return Promise.reject({ message: 'first fails' });
+            delivered.push(data.message);
+            return Promise.resolve({ status: 200 });
+        };
+        msgQueue.reset('u6');
+        msgQueue.enqueue('u6', '옛세션-답변');
+        await sleep(20);
+        msgQueue.reset('u6');            // 재시도 대기 중 새 세션 시작
+        await sleep(300);
+        axiosMock.post = saved;
+        check('이전 세션 답변이 재전송되지 않음',
+            !delivered.includes('옛세션-답변'), JSON.stringify(delivered));
+    }
+
+    console.log('\n[9] webhook URL 미설정 경로에도 큐 상한 적용');
+    {
+        delete require.cache[require.resolve(MSGQUEUE_PATH)];
+        process.env.UiPathWebhookUrl = '';
+        process.env.MessageQueuePort = '18081';
+        process.env.MaxQueuePerUser = '5';
+        const m2 = require(MSGQUEUE_PATH).msgQueue;
+        for (let i = 0; i < 30; i++) m2.enqueue('u7', `m${i}`);
+        await sleep(50);
+        check('상한 5 이하 유지', (m2.queue.get('u7') || []).length <= 5,
+            `실제 ${(m2.queue.get('u7') || []).length}건`);
+    }
+
     console.log(`\n결과: ${pass} 통과 / ${fail} 실패\n`);
     process.exit(fail ? 1 : 0);
 })();

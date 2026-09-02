@@ -35,7 +35,11 @@ const appTenantId = process.env.MicrosoftAppTenantId || '';
 const appPort = process.env.MicrosoftAppPort || 3978;
 const pollingSec = process.env.PollingIntervalSeconds || 3;
 const processTriggerInterval = process.env.ProcessTriggerInterval || 10;
-const processTriggerKeywords = (process.env.ProcessTriggerKeywords || '거래처,거래선').split(',');
+// 빈 문자열이 남으면 includes('') 가 항상 true 라 모든 메시지가 트리거가 된다.
+// (.env 의 후행 쉼표 하나로 그렇게 된다) trim + filter 필수.
+// fallback 도 업무 어휘가 아니라 명령어여야 한다.
+const processTriggerKeywords = (process.env.ProcessTriggerKeywords || '에이전트시작')
+    .split(',').map(k => k.trim()).filter(Boolean);
 const textFormat = process.env.TextFormat || 'markdown';
 const taskOwnerIds = process.env.TaskOwnerIds ? process.env.TaskOwnerIds.split(' ') : [];
 const appMessage1 = process.env.AppMessage1 || '';
@@ -48,7 +52,9 @@ const appMessage5 = process.env.AppMessage5 || '';
 //   입력하는 상황은 대개 이전 Job이 응답을 기다리며 살아 있는 상황이므로,
 //   정작 재시작이 필요한 순간에 거부되는 문제가 있었다.
 //   false로 두면 종전 동작으로 되돌아간다.
-const restartOnTrigger = String(process.env.RestartOnTrigger ?? 'true').toLowerCase() !== 'false';
+// 기본값 false: stopJob() 은 실제 Orchestrator 를 상대로 호출된 적이 없다.
+// 스테이징에서 확인한 뒤 .env 에서 true 로 켤 것. README 의 안내와 일치시킨다.
+const restartOnTrigger = String(process.env.RestartOnTrigger ?? 'false').toLowerCase() === 'true';
 
 // [D-15] Job 중지 방식. Kill = 즉시, SoftStop = 프로세스의 정지 지점까지 대기.
 //   대화형 에이전트는 사용자 입력 대기 중 정지 지점에 도달하지 못할 수 있어 Kill이 기본값.
@@ -85,6 +91,16 @@ const STOP_CONFIRM_INTERVAL_MS = 1000;
 // [D-8] tryProcessRun 동시 실행 가드.
 //   onMessage와 setInterval 양쪽에서 호출되므로 await 구간에서 겹칠 수 있다.
 let processRunInFlight = false;
+let processRunStartedAt = 0;
+
+// 스케줄러가 잠긴 채 방치되는 것을 감지한다.
+//   axios 타임아웃을 넣었으므로 정상적으로는 발생하지 않지만, 어떤 이유로든
+//   프라미스가 settle 되지 않으면 finally 가 실행되지 않아 전 사용자가 정지한다.
+//   헬스체크가 200 을 유지하므로 외부에서도 감지되지 않는다.
+const PROCESS_RUN_WATCHDOG_MS = Number(process.env.ProcessRunWatchdogMs || 180000);
+
+// 기동 실패 재시도 한도
+const MAX_START_RETRY = 3;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // Orchestrator 의 종료 상태는 Successful / Faulted / Stopped 세 가지다.
@@ -349,6 +365,8 @@ class TeamsApp extends TeamsActivityHandler {
             console.log(`[${new Date().toLocaleString()}] 사용자 '${userId}'에게 메시지 전송 완료:\n${text}`);
         } catch (error) {
             console.error(`[${new Date().toLocaleString()}] 사용자 '${userId}'에게 메시지 전송 중 오류 발생: ${error}`);
+            // 삼키면 /api/sendMessage 가 200 을 반환해 Maestro 가 전달됐다고 오해한다.
+            throw error;
         }
     }
 
@@ -383,7 +401,30 @@ const serverOptions = {
 };
 //const teamsAppServer = restify.createServer();  // HTTP 서버
 const teamsAppServer = restify.createServer(serverOptions);  // HTTPS 서버
-teamsAppServer.use(restify.plugins.bodyParser());
+// bodyParser 는 apiKeyAuth 보다 먼저 실행되므로 미인증 요청도 본문을 전부 버퍼링한다.
+// restify 11 기본값은 무제한이다.
+teamsAppServer.use(restify.plugins.bodyParser({ maxBodySize: 256 * 1024 }));
+
+// 갱신 주기는 약 59분이다. 최종 실패 후 다음 주기까지 기다리면 그 시간 동안
+// 서비스가 503 으로 내려간다. 복구될 때까지 짧은 주기로 재시도한다.
+const tokenRecoveryIntervalSec = Number(process.env.TokenRecoveryIntervalSec || 60);
+let tokenRecoveryTimer = null;
+
+function scheduleTokenRecovery() {
+    if (tokenRecoveryTimer) {
+        return;
+    }
+    tokenRecoveryTimer = setInterval(async () => {
+        const token = await UIPATH.getAccessToken();
+        if (token) {
+            app.uipathToken = token;
+            app.ready = true;
+            clearInterval(tokenRecoveryTimer);
+            tokenRecoveryTimer = null;
+            console.log(`[${new Date().toLocaleString()}] ✅ UiPath 인증 토큰 복구 성공.\n`);
+        }
+    }, tokenRecoveryIntervalSec * 1000);
+}
 
 function triggerUipathTokenRenewal() {
     setInterval(
@@ -411,7 +452,10 @@ function triggerUipathTokenRenewal() {
                 } else {
                     // [D-10] 갱신 실패 상태를 헬스체크에 반영한다.
                     app.ready = false;
-                    console.error(`[${new Date().toLocaleString()}] ❌ UiPath 인증 토큰 갱신 최종 실패.\n`);
+                    console.error(
+                        `[${new Date().toLocaleString()}] ❌ UiPath 인증 토큰 갱신 최종 실패. ` +
+                        `${tokenRecoveryIntervalSec}초 주기로 계속 재시도합니다.\n`);
+                    scheduleTokenRecovery();
                 }
             }
         },
@@ -451,17 +495,58 @@ async function runProcess(item) {
     }
 }
 
+// runProcess 는 실패 시 null 을 반환한다. 반환값을 버리면 사용자는 appMessage2
+// ("준비중입니다")만 받고 영원히 기다린다 — 첫 트리거가 바로 그 경로다.
+// 기동을 시도하고, 실패하면 되돌려 재시도하거나 사용자에게 알린다.
+async function startJobOrNotify(item) {
+    const jobId = await runProcess(item);
+
+    if (jobId) {
+        item.startRetry = 0;
+        return jobId;
+    }
+
+    item.startRetry = (item.startRetry || 0) + 1;
+
+    if (item.startRetry < MAX_START_RETRY) {
+        console.error(
+            `[${new Date().toLocaleString()}] ⚠️ 프로세스 기동 실패 ` +
+            `(${item.startRetry}/${MAX_START_RETRY}). 다음 주기에 재시도합니다.`);
+        // 재시작 프로토콜 상태를 초기화해 다음 패스가 처음부터 진행되도록 한다.
+        item.stopRequested = false;
+        item.confirmRound = 0;
+        item.restartNotified = false;
+        PROCQUEUE.queue.enqueue(item);
+    } else {
+        console.error(
+            `[${new Date().toLocaleString()}] ❌ 프로세스 기동을 ${MAX_START_RETRY}회 실패했습니다.`);
+        await app.createConversationAndSendMessage(item.id, appMessage1);
+    }
+
+    return null;
+}
+
 async function tryProcessRun() {
 
     // [D-8] 동시 실행 가드
     if (processRunInFlight) {
-        return;
+        const heldFor = Date.now() - processRunStartedAt;
+        if (processRunStartedAt && heldFor > PROCESS_RUN_WATCHDOG_MS) {
+            console.error(
+                `[${new Date().toLocaleString()}] ❌ 스케줄러가 ${Math.round(heldFor / 1000)}초 동안 ` +
+                `잠겨 있습니다. 가드를 해제하고 계속합니다. (응답 없는 상류 호출 의심)`);
+            app.ready = false;   // 헬스체크에 반영해 외부에서 감지 가능하게
+            processRunInFlight = false;
+        } else {
+            return;
+        }
     }
     if (PROCQUEUE.queue.isEmpty()) {
         return;
     }
 
     processRunInFlight = true;
+    processRunStartedAt = Date.now();
     try {
         const item = PROCQUEUE.queue.dequeue();
         if (!item) {
@@ -473,7 +558,7 @@ async function tryProcessRun() {
 
         // 등록된 Job이 없으면 그대로 기동한다.
         if (!jobId) {
-            await runProcess(item);
+            await startJobOrNotify(item);
             return;
         }
 
@@ -498,7 +583,7 @@ async function tryProcessRun() {
                 `[${new Date().toLocaleString()}] ⚠️ Job ${jobId} 상태를 ${maxStateCheckRetry}회 ` +
                 `확인하지 못했습니다. 중복 실행 위험을 감수하고 새 Job을 기동합니다.`);
             JOBTABLE.table.deleteJob(item.id);
-            await runProcess(item);
+            await startJobOrNotify(item);
             return;
         }
 
@@ -507,7 +592,7 @@ async function tryProcessRun() {
         // ── [D-4] 이전 Job이 이미 종료됨 ──────────────────────
         if (isTerminal(state)) {
             JOBTABLE.table.deleteJob(item.id);
-            await runProcess(item);
+            await startJobOrNotify(item);
             return;
         }
 
@@ -551,6 +636,7 @@ async function tryProcessRun() {
             }
 
             item.stopRequested = true;
+            item.restartRetry = 0;   // 이번 라운드의 실패 횟수만 세도록 초기화
         }
 
         if (!item.restartNotified) {
@@ -595,23 +681,7 @@ async function tryProcessRun() {
         }
 
         JOBTABLE.table.deleteJob(item.id);
-
-        // 기동에 실패하면 사용자는 세션도 잃고 새 세션도 못 얻는다. 되돌려 재시도한다.
-        const newJobId = await runProcess(item);
-        if (!newJobId) {
-            item.startRetry = (item.startRetry || 0) + 1;
-            if (item.startRetry < 3) {
-                console.error(
-                    `[${new Date().toLocaleString()}] ⚠️ 재시작 후 기동 실패 ` +
-                    `(${item.startRetry}/3). 다음 주기에 재시도합니다.`);
-                item.stopRequested = false;
-                item.confirmRound = 0;
-                PROCQUEUE.queue.enqueue(item);
-            } else {
-                await app.createConversationAndSendMessage(item.id, appMessage1);
-            }
-        }
-
+        await startJobOrNotify(item);
     } finally {
         processRunInFlight = false;
     }
@@ -625,7 +695,6 @@ function triggerProcessRun() {
 teamsAppServer.listen(appPort, async () => {
 
     console.log(`\nApp ID: ${appId}`);
-    console.log(`App Password: ${appPassword.substring(0, 8)}...`);
     console.log(`Tenant ID: ${appTenantId}`);
 
     console.log(`\nTeams App listening to ${teamsAppServer.url}`);
