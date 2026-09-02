@@ -23,6 +23,24 @@ const uipathAuthScope = 'OR.Administration OR.Administration.Read OR.Administrat
 const uipathASRobotName = process.env.UiPathASRobotName || '[Default] Automation Suite Robot';
 const longNameLength = process.env.LongNameLength || 36;
 
+// Orchestrator OData 의 기본 경로.
+//
+//   문서상 경로는  {도메인}/{org}/{tenant}/orchestrator_/odata/...  이지만,
+//   이 배포(as.lgcnsrpa.com)의 ingress 는 orchestrator_ 없이도 라우팅한다.
+//   StartJobs(201) · getJobState 가 운영에서 정상 동작하는 것으로 확인됨.
+//   (identity_ 는 붙는데 orchestrator_ 는 안 붙는 비대칭 구성이다)
+//
+//   기본값 '' 는 현재 동작을 그대로 유지한다. 플랫폼 업그레이드나 ingress 변경으로
+//   404 가 나기 시작하면 .env 에 UiPathOrchestratorPath="orchestrator_" 만 넣으면 된다.
+//   코드를 고치지 않아도 되도록 설정으로 빼 둔다.
+const uipathOrchestratorPath = process.env.UiPathOrchestratorPath || '';
+
+// {base}/{org}/{tenant}[/{orchestratorPath}]
+function odataBase() {
+    const prefix = `${uipathBaseURL}/${uipathOrganizationName}/${uipathTenantName}`;
+    return uipathOrchestratorPath ? `${prefix}/${uipathOrchestratorPath}` : prefix;
+}
+
 // 모듈 내부 토큰 캐시 (getAccessToken 호출 시 자동 갱신됨)
 let cachedTokenObj = null;
 
@@ -91,7 +109,7 @@ async function runProcess(token, inputArguments) {
         return null;
     }
 
-    const apiUrl = `${uipathBaseURL}/${uipathOrganizationName}/${uipathTenantName}/odata/Jobs/UiPath.Server.Configuration.OData.StartJobs`;
+    const apiUrl = `${odataBase()}/odata/Jobs/UiPath.Server.Configuration.OData.StartJobs`;
 
     const jobPayload = {
         startInfo: {
@@ -157,7 +175,7 @@ async function getAvailableRuntimes(token) {
     try {
         // 특정 머신의 Total Runtimes 조회
 
-        const machineUrl = `${uipathBaseURL}/${uipathOrganizationName}/${uipathTenantName}/odata/Machines`;
+        const machineUrl = `${odataBase()}/odata/Machines`;
         const machineRes = await axios.get(machineUrl, {
             params: {
                 $filter: `Name eq '${uipathASRobotName}'`
@@ -183,7 +201,7 @@ async function getAvailableRuntimes(token) {
 
         // 해당 머신에서 실행 중인 job 수 조회
 
-        const jobsUrl = `${uipathBaseURL}/${uipathOrganizationName}/${uipathTenantName}/odata/Jobs`;
+        const jobsUrl = `${odataBase()}/odata/Jobs`;
         const jobsRes = await axios.get(jobsUrl, {
             params: {
                 //$filter: `State eq 'Running' and HostMachineName eq ${MACHINE_NAME}`
@@ -231,7 +249,7 @@ async function getJobState(token, jobId) {
         return null;
     }
 
-    const apiUrl = `${uipathBaseURL}/${uipathOrganizationName}/${uipathTenantName}/odata/Jobs(${jobId})`;
+    const apiUrl = `${odataBase()}/odata/Jobs(${jobId})`;
 
     try {
         const response = await axios.get(apiUrl, {
@@ -281,8 +299,7 @@ async function stopJob(token, jobId, strategy = 'Kill') {
         return false;
     }
 
-    const apiUrl = `${uipathBaseURL}/${uipathOrganizationName}/${uipathTenantName}`
-                 + `/odata/Jobs/UiPath.Server.Configuration.OData.StopJobs`;
+    const apiUrl = `${odataBase()}/odata/Jobs/UiPath.Server.Configuration.OData.StopJobs`;
 
     // jobIds 는 숫자 배열이다. runProcess 가 반환하는 Id 를 그대로 넘기되 숫자로 맞춘다.
     const payload = { jobIds: [Number(jobId)], strategy: strategy };

@@ -64,6 +64,19 @@ schedulers are running. Before that, or after a token renewal fails, it returns
 - Set `RestartOnTrigger=false` to restore the previous behaviour where a trigger
   keyword typed during a running job is refused instead of restarting it.
 
+## Orchestrator URL path
+
+The documented OData path is `{domain}/{org}/{tenant}/orchestrator_/odata/...`, but this
+deployment reaches Orchestrator **without** the `orchestrator_` segment — `StartJobs` and
+`getJobState` both work against `https://as.lgcnsrpa.com/innotek/DefaultTenant/odata/...`.
+The identity endpoint does use its suffix (`/identity_/connect/token`), so the ingress is
+asymmetric.
+
+`UiPathOrchestratorPath` defaults to empty, preserving that behaviour exactly. **Do not
+"correct" the URL in code.** If Orchestrator calls start returning 404 after a platform
+upgrade or an ingress change, set `UiPathOrchestratorPath="orchestrator_"` in `.env` — no
+code change needed.
+
 ## Trigger keywords
 
 `ProcessTriggerKeywords` must contain **commands**, not business vocabulary. Matching is

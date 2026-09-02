@@ -83,6 +83,14 @@ const check = (name, cond, detail = '') => {
     const failed = await UIPATH.stopJob('tok', 100);
     check('false 반환', failed === false);
 
+    console.log('\n[5] odataBase — 기본값은 현재 운영 경로를 그대로 유지');
+    captured = null; shouldFail = false;
+    await UIPATH.stopJob('tok', 1);
+    check('orchestrator_ 세그먼트 없음 (운영 현행)',
+        captured.url === 'https://cloud.uipath.com/myorg/mytenant'
+                       + '/odata/Jobs/UiPath.Server.Configuration.OData.StopJobs',
+        captured.url);
+
     console.log(`\n결과: ${pass} 통과 / ${fail} 실패\n`);
     process.exit(fail ? 1 : 0);
 })();
