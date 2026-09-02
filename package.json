@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "main": "main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint": "eslint *.js",
+    "test": "node test/msgqueue.smoke.js",
+    "check": "npm run lint && npm test"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Teams App that relays chat messages between Microsoft Teams and UiPath Maestro",
   "dependencies": {
     "@azure/identity": "^4.13.0",
     "@microsoft/microsoft-graph-client": "^3.0.7",
@@ -16,5 +18,8 @@
     "botbuilder": "^4.23.3",
     "dotenv": "^16.0.0",
     "restify": "^11.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.5"
   }
 }

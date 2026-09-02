@@ -26,6 +26,25 @@ This solution overcomes the limitations of the UiPath Integration Service Teams 
 12. Perform tests using this Teams App
 
 
+## Checks
+
+```bash
+npm run lint     # eslint - no-undef, no-unreachable
+npm test         # msgqueue behaviour (mocked axios)
+npm run check    # both
+```
+
+`npm run lint` is what catches an identifier used but never declared, and code
+placed after a `throw`. Both classes of defect shipped to production in this
+repository before these checks existed — run it before every push.
+
+`npm test` needs `cert.pem`/`key.pem` present, since `msgqueue.js` opens an
+HTTPS server at module load. A throwaway pair is fine:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 1 -nodes -subj "/CN=test.local"
+```
+
 ## Health check
 
 `GET /` returns `200` only once the UiPath token has been obtained and the

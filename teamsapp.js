@@ -37,12 +37,10 @@ const pollingSec = process.env.PollingIntervalSeconds || 3;
 const processTriggerInterval = process.env.ProcessTriggerInterval || 10;
 const processTriggerKeywords = (process.env.ProcessTriggerKeywords || '거래처,거래선').split(',');
 const textFormat = process.env.TextFormat || 'markdown';
-const requiredRuntimes = process.env.RequiredRuntimes || 0;
 const taskOwnerIds = process.env.TaskOwnerIds ? process.env.TaskOwnerIds.split(' ') : [];
 const appMessage1 = process.env.AppMessage1 || '';
 const appMessage2 = process.env.AppMessage2 || '';
 const appMessage3 = process.env.AppMessage3 || '';
-const appMessage4 = process.env.AppMessage4 || '';
 const appMessage5 = process.env.AppMessage5 || '';
 
 // [D-15] 실행 중인 Job이 있을 때 트리거 키워드를 재시작으로 처리할지 여부.
