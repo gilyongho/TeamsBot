@@ -25,10 +25,39 @@ Bot Framework Connector)를 mock 으로 대체합니다. Teams 활동은 `/api/m
 
 **실제 Orchestrator 검증은 별도로 필요합니다** — 아래 "남은 한 가지" 참조.
 
+## 위험과 방지
+
+하네스 자체는 운영 프로세스를 건드리지 않습니다. 위험은 전부 **디렉터리를 잘못 잡는
+한 가지 실수**에서 나옵니다.
+
+| 실수 | 결과 |
+|---|---|
+| 운영 디렉터리에서 `cp … .env` | 운영 설정이 덮어씌워짐. 다음 재시작 때 운영이 가짜 상류를 바라봄 |
+| 운영 디렉터리에서 `openssl … cert.pem` | **운영 TLS 인증서 파괴 → 서비스 중단** |
+| 운영 디렉터리에서 `npm install` | 의존성이 브랜치 것으로 바뀜 |
+| 하네스 `.env` 에 운영 값이 섞임 | 진짜 Orchestrator 에 Job 기동, 진짜 사용자에게 Teams 발송 |
+
+**그래서 먼저 `preflight.sh` 를 실행하십시오.** 위 조건을 검사하고 하나라도 걸리면
+아무것도 하지 않고 멈춥니다.
+
+```bash
+bash test/harness/preflight.sh
+```
+
+검사 항목: 운영 경로 밖인지 · 덮어쓸 `.env`/인증서가 없는지 · systemd 유닛의
+`WorkingDirectory` 와 겹치지 않는지 · 포트 3979/8081/19000 이 비었는지 ·
+하네스 설정이 로컬 mock 을 가리키는지 · `MicrosoftAppId` 가 비었는지 · 메모리와 디스크.
+
+남는 위험 두 가지는 검사로 막을 수 없으니 알고 계셔야 합니다.
+
+- 앱의 HTTPS 서버는 `0.0.0.0` 에 바인딩합니다. 하네스 동안 **3979/8081 이 사내망에
+  노출**되고, 로컬 개발 모드라 `/api/messages` 는 인증 없이 활동을 받습니다. 도달 범위는
+  mock 뿐이지만, 실행 시간을 짧게 가져가거나 방화벽으로 막으십시오.
+- 프로세스를 정리하지 않으면 포트가 계속 점유됩니다. 아래 "정리" 를 반드시 수행하십시오.
+
 ## 준비
 
-운영 디렉터리와 **분리된 곳**에 클론하십시오. 같은 디렉터리에서 `.env` 를 바꾸면
-운영 인스턴스가 재시작될 때 그 설정을 읽습니다.
+운영 디렉터리와 **분리된 곳**에 클론하십시오.
 
 ```bash
 cd ~   # 운영 경로(/home/teamsuser/workspace/TeamsBot) 밖
@@ -39,6 +68,7 @@ cd tb-harness && npm install
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
   -days 1 -nodes -subj "/CN=localhost"
 
+bash test/harness/preflight.sh      # ← 통과해야만 다음으로
 cp test/harness/env.harness .env
 ```
 
