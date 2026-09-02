@@ -7,11 +7,11 @@
 //   - 1차가 실패한 경우에만 재시도한다.
 //   - 두 번 다 실패하면 메시지를 큐에 보존한다.  ← 이게 없으면 사용자 답변이 소실된다.
 //
-// 실행:  npm test
-// 사전:  cert.pem / key.pem 이 저장소 루트에 있어야 한다 (msgqueue.js 가 모듈
-//        로드 시점에 HTTPS 서버를 연다). 임시 인증서로 충분하다:
-//   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
-//     -days 1 -nodes -subj "/CN=test.local"
+// 실행:  npm test        (사전 준비 없음)
+//
+// msgqueue.js 는 모듈 로드 시점에 restify HTTPS 서버를 연다. 그대로 두면 테스트가
+// cert.pem 을 요구하고 포트까지 점유하므로, 아래에서 restify 를 stub 으로 갈아끼운다.
+// 이 테스트가 보는 것은 enqueue() 의 발송 동작뿐이고 REST 엔드포인트가 아니다.
 //------------------------------------------------
 
 const path = require('path');
@@ -45,9 +45,33 @@ const axiosMock = {
     get: () => Promise.resolve({ data: {} })
 };
 
+// ── restify stub ──────────────────────────────────────────────
+// createServer 가 cert.pem / key.pem 을 읽지 않고, listen 이 포트를 잡지 않도록 한다.
+// 없으면 신규 클론에서 `npm test` 가 ENOENT: cert.pem 으로 죽는다.
+const noop = () => {};
+const serverStub = {
+    use: noop, get: noop, post: noop, put: noop, del: noop,
+    on: noop, listen: (port, cb) => { if (typeof cb === 'function') cb(); }
+};
+const restifyMock = {
+    createServer: () => serverStub,
+    plugins: { bodyParser: () => noop, queryParser: () => noop }
+};
+
+// msgqueue.js 는 serverOptions 를 만들 때 fs.readFileSync('cert.pem') 을 직접 호출한다.
+// restify 를 stub 해도 이 읽기는 그대로 일어나므로 두 파일만 가로챈다.
+const realFs = require('fs');
+const fsMock = Object.create(realFs);
+fsMock.readFileSync = function (p, ...rest) {
+    if (p === 'cert.pem' || p === 'key.pem') return Buffer.from('stub');
+    return realFs.readFileSync(p, ...rest);
+};
+
 const realLoad = Module._load;
 Module._load = function (request) {
     if (request === 'axios') return axiosMock;
+    if (request === 'restify') return restifyMock;
+    if (request === 'fs') return fsMock;
     return realLoad.apply(this, arguments);
 };
 

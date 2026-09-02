@@ -11,11 +11,15 @@
   "author": "",
   "license": "ISC",
   "description": "Teams App that relays chat messages between Microsoft Teams and UiPath Maestro",
+  "engines": {
+    "node": ">=22.11.0 <23 || >=24.0.0 <25"
+  },
   "dependencies": {
     "@azure/identity": "^4.13.0",
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "axios": "^1.13.2",
     "botbuilder": "^4.23.3",
+    "botframework-connector": "4.23.3",
     "dotenv": "^16.0.0",
     "restify": "^11.0.0"
   },

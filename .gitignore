@@ -142,3 +142,7 @@ vite.config.ts.timestamp-*
 # certificates
 cert.pem
 key.pem
+
+# 대체 패키지 매니저 / 도구 캐시 (동료 리뷰에서 추가)
+.pnpm-store/
+.tools/
