@@ -80,6 +80,10 @@ const STOP_CONFIRM_INTERVAL_MS = 1000;
 let processRunInFlight = false;
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// Orchestrator 의 종료 상태는 Successful / Faulted / Stopped 세 가지다.
+//   Pending · Running · Stopping · Terminating · Suspended · Resumed 는 모두 중간 상태.
+//   SoftStop → Successful, Kill → (Terminating 경유) → Stopped 로 간다.
+//   https://docs.uipath.com/orchestrator/automation-cloud/latest/user-guide/job-states
 const isTerminal = (state) => ['FAULTED', 'SUCCESSFUL', 'STOPPED'].includes(String(state).toUpperCase());
 
 // API Key Authentication

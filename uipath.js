@@ -260,9 +260,20 @@ async function getJobState(token, jobId) {
     }
 }
 
-// [D-15] job을 중지시킨다. strategy: 'Kill' | 'SoftStop'
-// SoftStop은 프로세스가 정지 지점에 도달해야 멈추는데, 사용자 입력을 기다리는
-// 대화형 에이전트는 그 지점에 도달하지 못할 수 있어 Kill을 기본값으로 둔다.
+// [D-15] job을 중지시킨다.
+//
+//   POST /odata/Jobs/UiPath.Server.Configuration.OData.StopJobs
+//   body { "jobIds": [<id>], "strategy": "Kill" }
+//
+//   컬렉션 레벨의 벌크 액션이다. 키 지정 형태(Jobs({id})/...StopJob)는 문서에 없다.
+//   위의 runProcess() 가 쓰는 StartJobs 와 같은 모양이다.
+//   strategy 허용값: "SoftStop" | "1" | "Kill" | "2"
+//
+//   SoftStop 은 프로세스가 Should Stop 지점에 도달해야 멈추고 Successful 로 간다.
+//   대화형 에이전트는 사용자 입력을 기다리는 동안 그 지점에 도달하지 못할 수 있어
+//   Kill 을 기본값으로 둔다. Kill 은 Terminating 을 거쳐 Stopped 로 간다.
+//
+//   참고: https://docs.uipath.com/orchestrator/automation-cloud/latest/api-guide/jobs-requests
 async function stopJob(token, jobId, strategy = 'Kill') {
 
     if (!token) {
@@ -271,10 +282,13 @@ async function stopJob(token, jobId, strategy = 'Kill') {
     }
 
     const apiUrl = `${uipathBaseURL}/${uipathOrganizationName}/${uipathTenantName}`
-                 + `/odata/Jobs(${jobId})/UiPath.Server.Configuration.OData.StopJob`;
+                 + `/odata/Jobs/UiPath.Server.Configuration.OData.StopJobs`;
+
+    // jobIds 는 숫자 배열이다. runProcess 가 반환하는 Id 를 그대로 넘기되 숫자로 맞춘다.
+    const payload = { jobIds: [Number(jobId)], strategy: strategy };
 
     try {
-        await axios.post(apiUrl, { strategy: strategy }, {
+        await axios.post(apiUrl, payload, {
             headers: {
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json',

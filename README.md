@@ -38,7 +38,9 @@ npm run check    # both
 placed after a `throw`. Both classes of defect shipped to production in this
 repository before these checks existed — run it before every push.
 
-`npm test` needs `cert.pem`/`key.pem` present, since `msgqueue.js` opens an
+`npm test` runs two suites: `test/uipath.smoke.js` (pins the `stopJob` request
+shape against the Orchestrator API docs) and `test/msgqueue.smoke.js`.
+The latter needs `cert.pem`/`key.pem` present, since `msgqueue.js` opens an
 HTTPS server at module load. A throwaway pair is fine:
 
 ```bash
@@ -77,4 +79,5 @@ and starts over. Keep them to explicit start phrases.
 | `conversationReference` | A single instance field shared by every user (`teamsapp.js`). Works in a single tenant because `serviceUrl` and the bot identity are constant, but it should be a `Map<userId, ref>`. `sendMessageToCurrentUser()` would deliver to whoever messaged last; it currently has no caller. |
 | Trigger typos | Matching is exact-substring after whitespace removal and case folding, so transposition typos (`이에전트` for `에이전트`) still miss. Listing variants does not scale — an Adaptive Card button is the real fix, and needs manifest and Maestro-side changes. |
 | `getAvailableRuntimes()` | No caller since `312ff30`. Its Machines query is tenant-scoped while its Jobs query is folder-scoped, so the figure it returns is overstated. Fix the scope before reusing it. |
+| `stopJob` untested against a live Orchestrator | The request shape now follows the documented bulk action (`POST /odata/Jobs/UiPath.Server.Configuration.OData.StopJobs`, body `{jobIds:[id], strategy:"Kill"}`) and is pinned by `test/uipath.smoke.js`, but it has never been executed against a real tenant. Verify in staging before enabling `RestartOnTrigger`. |
 | Webhook receiver auth | The webhook key header name was wrong until `68ec713`, yet the receiver still returned 200. Confirm the receiver actually validates it. |
