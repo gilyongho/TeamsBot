@@ -126,6 +126,14 @@ substring-after-whitespace-removal, so a keyword like `거래선` fires on any a
 happens to contain the word — and with `RestartOnTrigger=true` that kills the live session
 and starts over. Keep them to explicit start phrases.
 
+## Known limitations a user can hit
+
+| Situation | What happens | Why |
+|---|---|---|
+| Service restarts while a job is live | The Orchestrator job keeps running but `JobTable` is in-memory and empty after restart. The user's next answer still reaches the orphan job through the webhook; a new trigger starts a **second** job into the same conversation, because the guard has nothing to check against. | `jobtable.js` holds state only in memory and `SIGTERM` does not drain. Before restarting, let live conversations finish, or reconcile against Orchestrator afterwards. |
+| A job dies without the server knowing | Answers are POSTed, the receiver returns 200, and the user gets silence. The server cannot tell a live job from a dead one — the webhook receiver acknowledges either way. | Nothing links `JobTable` to real Orchestrator state except the check made when a new trigger arrives. |
+| Trigger typed while a job runs, `RestartOnTrigger=false` | The user is told the previous job is still running, and the message is also forwarded to the agent so it is not lost. There is no user-facing way to end a stuck session. | Ending one requires `stopJob`, which is what `RestartOnTrigger` gates. Verify it in staging and turn it on. |
+
 ## Known remaining items
 
 | Item | Note |

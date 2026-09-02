@@ -56,7 +56,20 @@ const uipathOrchestratorPath = process.env.UiPathOrchestratorPath || '';
 //   axios 기본값은 0(무한 대기)이다. TCP 는 붙었는데 응답이 오지 않는 상태
 //   (ingress 장애·failover·half-open NAT)에서 프라미스가 영원히 settle 되지 않으면
 //   tryProcessRun 의 finally 가 실행되지 않아 스케줄러가 통째로 잠긴다.
-const uipathHttpTimeout = Number(process.env.UiPathHttpTimeoutMs || 15000);
+const uipathHttpTimeout = (() => {
+    const n = Number(process.env.UiPathHttpTimeoutMs);
+    // '0' 은 truthy 문자열이라 || 로는 걸러지지 않고, axios 에서 0 은 "무한 대기"다.
+    // 오타는 NaN 이 되어 역시 무한 대기가 된다. 둘 다 이 상수의 존재 이유를 무력화한다.
+    if (!Number.isFinite(n) || n < 1000) {
+        if (process.env.UiPathHttpTimeoutMs !== undefined) {
+            console.error(
+                `⚠️ UiPathHttpTimeoutMs='${process.env.UiPathHttpTimeoutMs}' 은(는) 유효하지 않습니다. ` +
+                `기본값 15000 을 사용합니다.`);
+        }
+        return 15000;
+    }
+    return n;
+})();
 
 // {base}/{org}/{tenant}[/{orchestratorPath}]
 function odataBase() {

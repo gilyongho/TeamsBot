@@ -43,7 +43,8 @@ const processTriggerKeywords = (process.env.ProcessTriggerKeywords || '에이전
 const textFormat = process.env.TextFormat || 'markdown';
 const taskOwnerIds = process.env.TaskOwnerIds ? process.env.TaskOwnerIds.split(' ') : [];
 const appMessage1 = process.env.AppMessage1 || '';
-const appMessage2 = process.env.AppMessage2 || '';
+// 기본 문구가 "이전에 요청하신 …" 이면 첫 사용자에게 사실이 아니다.
+const appMessage2 = process.env.AppMessage2 || '요청하신 업무를 시작하기 위해 준비중입니다.<br>잠시만 기다려주세요.';
 const appMessage3 = process.env.AppMessage3 || '';
 const appMessage5 = process.env.AppMessage5 || '';
 
@@ -67,21 +68,47 @@ const stopStrategy = process.env.JobStopStrategy || 'Kill';
 const appMessage7 = process.env.AppMessage7
     || '죄송합니다. 방금 입력하신 내용을 처리하지 못했습니다.<br>잠시 후 다시 입력해주세요.';
 
+// 진행 중인 세션이 없는데 일반 메시지가 들어왔을 때의 안내.
+//   이 메시지를 소비할 Job 이 없으므로 webhook 으로 보내봐야 200 만 돌아오고
+//   사용자는 영원히 응답을 못 받는다. 시작 방법을 알려주는 것이 유일한 출구다.
+//   봇이 보내는 어떤 메시지에도 트리거 문구가 들어있지 않았다.
+const appMessage8 = process.env.AppMessage8
+    || `진행 중인 대화가 없습니다.<br>시작하시려면 <b>'${processTriggerKeywords[0] || '에이전트 시작'}'</b>이라고 입력해주세요.`;
+
+// 재시작을 시도했으나 이전 Job 의 종료를 확인하지 못했을 때의 안내.
+//   appMessage5("종료된 후 다시 요청하세요")는 이 상황에서 거짓이다. 중지를 이미
+//   요청했으므로 그 Job 은 돌아오지 않는다.
+const appMessage9 = process.env.AppMessage9
+    || `이전 작업을 정리하는 중입니다.<br>잠시 후 <b>'${processTriggerKeywords[0] || '에이전트 시작'}'</b>이라고 다시 입력해주세요.`;
+
 // [D-15] 재시작 안내 메시지
 const appMessage6 = process.env.AppMessage6
     || '진행 중이던 작업을 종료하고 처음부터 다시 시작합니다.<br>잠시만 기다려주세요.';
 
+// 숫자 환경변수는 반드시 이 헬퍼로 읽는다.
+//   Number(process.env.X || def) 는 '0'(truthy 문자열)이나 오타에서 0/NaN 을 만들고,
+//   그 값이 그대로 가드의 임계치가 되면 가드가 조용히 꺼진다.
+function numEnv(name, def, min = 1) {
+    const n = Number(process.env[name]);
+    if (!Number.isFinite(n) || n < min) {
+        if (process.env[name] !== undefined) {
+            console.error(
+                `[${new Date().toLocaleString()}] ⚠️ ${name}='${process.env[name]}' 은(는) 유효하지 않습니다. ` +
+                `기본값 ${def} 을(를) 사용합니다.`);
+        }
+        return def;
+    }
+    return n;
+}
+
 // [D-8] Job 상태 조회 연속 실패 허용 횟수
-const maxStateCheckRetry = (() => {
-    const n = Number(process.env.MaxStateCheckRetry);
-    return Number.isFinite(n) && n >= 1 ? n : 3;   // '0'/'abc' 는 가드를 무력화하므로 기본값으로
-})();
+const maxStateCheckRetry = numEnv('MaxStateCheckRetry', 3);
 
 // [D-15] 중지 확인이 끝나지 않을 때 포기하기까지의 주기 수
 const maxRestartConfirmRounds = 3;
 
 // [D-15] 방금 기동한 Job 을 중복 트리거가 다시 죽이지 않도록 하는 쿨다운
-const RESTART_COOLDOWN_MS = Number(process.env.RestartCooldownMs || 15000);
+const RESTART_COOLDOWN_MS = numEnv('RestartCooldownMs', 15000, 0);
 const lastJobStartedAt = new Map();
 
 // [D-15] 중지 후 실제 종료 확인 폴링
@@ -97,7 +124,9 @@ let processRunStartedAt = 0;
 //   axios 타임아웃을 넣었으므로 정상적으로는 발생하지 않지만, 어떤 이유로든
 //   프라미스가 settle 되지 않으면 finally 가 실행되지 않아 전 사용자가 정지한다.
 //   헬스체크가 200 을 유지하므로 외부에서도 감지되지 않는다.
-const PROCESS_RUN_WATCHDOG_MS = Number(process.env.ProcessRunWatchdogMs || 180000);
+// 정상 최악 소요는 타임아웃 합계 약 125초 + Teams 발신이다. 임계치는 그보다 충분히 커야
+// 건강한 실행에서 오탐하지 않는다.
+const PROCESS_RUN_WATCHDOG_MS = numEnv('ProcessRunWatchdogMs', 600000, 60000);
 
 // 기동 실패 재시도 한도
 const MAX_START_RETRY = 3;
@@ -175,7 +204,10 @@ class TeamsApp extends TeamsActivityHandler {
         super();
 
         this.uipathToken = null; // UiPath 인증 토큰 (JSON 객체)
-        this.ready = false; // [D-10] UiPath 연동 준비 완료 여부 (헬스체크용)
+        // [D-10] 헬스체크용 상태. 소유자가 다르므로 플래그를 분리한다.
+        //   하나로 합치면 워치독이 내린 값을 토큰 갱신이 되살려 실제 상태를 가린다.
+        this.uipathReady = false;       // 토큰 확보 여부 (토큰 갱신 경로가 소유)
+        this.schedulerHealthy = true;   // 스케줄러 정상 여부 (워치독이 소유)
         this.conversationReference = null; // 대화 참조 정보
 
         // 메시지 수신 핸들러
@@ -201,7 +233,10 @@ class TeamsApp extends TeamsActivityHandler {
             const cleanText = removedMentionText ? removedMentionText.trim() : text;
             //console.log(`정제 메시지: '${cleanText}'`);
             
-            if (processTriggerKeywords.some(keyword => cleanText.replace(/\s/g, '').toUpperCase().includes(keyword.toUpperCase()))) {
+            const normalized = cleanText.replace(/\s/g, '').toUpperCase();
+            const isTrigger = processTriggerKeywords.some(k => normalized.includes(k.toUpperCase()));
+
+            if (isTrigger) {
 
                 // 프로세스 큐에 추가한다.
                 PROCQUEUE.queue.enqueue({
@@ -214,6 +249,16 @@ class TeamsApp extends TeamsActivityHandler {
 
                 // 큐를 트리거해준다.
                 tryProcessRun();
+
+            } else if (!JOBTABLE.table.hasJob(userInfo.id)) {
+
+                // 진행 중인 세션이 없다. 이 메시지를 소비할 Job 이 없으므로 webhook 으로
+                // 보내면 200 만 돌아오고 사용자는 아무 응답도 받지 못한다.
+                // 첫 사용자가 인사말에 자연어로 답하는 경우가 정확히 이 경로다.
+                console.log(
+                    `[${new Date().toLocaleString()}] 진행 중인 세션이 없어 시작 방법을 안내합니다. ` +
+                    `사용자 '${userInfo.id}'`);
+                await app.createConversationAndSendMessage(userInfo.id, appMessage8);
 
             } else {
                 // 메시지 큐에 메시지 추가
@@ -363,10 +408,13 @@ class TeamsApp extends TeamsActivityHandler {
                 await context.sendActivity(message);
             });
             console.log(`[${new Date().toLocaleString()}] 사용자 '${userId}'에게 메시지 전송 완료:\n${text}`);
+            return true;
         } catch (error) {
             console.error(`[${new Date().toLocaleString()}] 사용자 '${userId}'에게 메시지 전송 중 오류 발생: ${error}`);
-            // 삼키면 /api/sendMessage 가 200 을 반환해 Maestro 가 전달됐다고 오해한다.
-            throw error;
+            // 던지지 않는다. tryProcessRun 은 catch 가 없고 호출부가 await 하지 않으므로
+            // 예외가 unhandledRejection 이 되어 큐에서 꺼낸 항목이 통째로 사라진다.
+            // 대신 실패를 반환해 호출부가 판단하게 한다.
+            return false;
         }
     }
 
@@ -407,7 +455,7 @@ teamsAppServer.use(restify.plugins.bodyParser({ maxBodySize: 256 * 1024 }));
 
 // 갱신 주기는 약 59분이다. 최종 실패 후 다음 주기까지 기다리면 그 시간 동안
 // 서비스가 503 으로 내려간다. 복구될 때까지 짧은 주기로 재시도한다.
-const tokenRecoveryIntervalSec = Number(process.env.TokenRecoveryIntervalSec || 60);
+const tokenRecoveryIntervalSec = numEnv('TokenRecoveryIntervalSec', 60, 5);
 let tokenRecoveryTimer = null;
 
 function scheduleTokenRecovery() {
@@ -418,7 +466,7 @@ function scheduleTokenRecovery() {
         const token = await UIPATH.getAccessToken();
         if (token) {
             app.uipathToken = token;
-            app.ready = true;
+            app.uipathReady = true;
             clearInterval(tokenRecoveryTimer);
             tokenRecoveryTimer = null;
             console.log(`[${new Date().toLocaleString()}] ✅ UiPath 인증 토큰 복구 성공.\n`);
@@ -432,7 +480,7 @@ function triggerUipathTokenRenewal() {
             const newToken = await UIPATH.getAccessToken();
             if (newToken) {
                 app.uipathToken = newToken;
-                app.ready = true;
+                app.uipathReady = true;
                 console.log(`[${new Date().toLocaleString()}] ✅ UiPath 인증 토큰 갱신 성공.\n`);
             } else {
                 // 갱신 주기는 약 59분이다. 한 번의 일시적 실패로 한 시간 동안
@@ -447,11 +495,11 @@ function triggerUipathTokenRenewal() {
 
                 if (recovered) {
                     app.uipathToken = recovered;
-                    app.ready = true;
+                    app.uipathReady = true;
                     console.log(`[${new Date().toLocaleString()}] ✅ UiPath 인증 토큰 재시도 성공.\n`);
                 } else {
                     // [D-10] 갱신 실패 상태를 헬스체크에 반영한다.
-                    app.ready = false;
+                    app.uipathReady = false;
                     console.error(
                         `[${new Date().toLocaleString()}] ❌ UiPath 인증 토큰 갱신 최종 실패. ` +
                         `${tokenRecoveryIntervalSec}초 주기로 계속 재시도합니다.\n`);
@@ -515,7 +563,8 @@ async function startJobOrNotify(item) {
         // 재시작 프로토콜 상태를 초기화해 다음 패스가 처음부터 진행되도록 한다.
         item.stopRequested = false;
         item.confirmRound = 0;
-        item.restartNotified = false;
+        // restartNotified 는 되살리지 않는다. 되살리면 이미 중지·삭제가 끝난 뒤에
+        // "이전 요청이 진행중인지 확인중입니다"(appMessage2)를 다시 보내게 된다.
         PROCQUEUE.queue.enqueue(item);
     } else {
         console.error(
@@ -532,14 +581,17 @@ async function tryProcessRun() {
     if (processRunInFlight) {
         const heldFor = Date.now() - processRunStartedAt;
         if (processRunStartedAt && heldFor > PROCESS_RUN_WATCHDOG_MS) {
+            // 가드를 해제하면 안 된다. 원래 실행이 나중에 끝나면서 그 finally 가
+            // 두 번째 실행의 가드를 지워버려, 이후 세 번째가 아무 제지 없이 들어온다.
+            // 뮤텍스가 일시적으로가 아니라 영구히 망가진다.
+            // 상태를 신뢰할 수 없으므로 종료하고 systemd 재시작에 맡긴다.
             console.error(
                 `[${new Date().toLocaleString()}] ❌ 스케줄러가 ${Math.round(heldFor / 1000)}초 동안 ` +
-                `잠겨 있습니다. 가드를 해제하고 계속합니다. (응답 없는 상류 호출 의심)`);
-            app.ready = false;   // 헬스체크에 반영해 외부에서 감지 가능하게
-            processRunInFlight = false;
-        } else {
-            return;
+                `잠겨 있습니다. 상태를 신뢰할 수 없어 프로세스를 종료합니다. (응답 없는 상류 호출 의심)`);
+            app.schedulerHealthy = false;
+            process.exit(1);
         }
+        return;
     }
     if (PROCQUEUE.queue.isEmpty()) {
         return;
@@ -598,8 +650,14 @@ async function tryProcessRun() {
 
         // ── 이전 Job이 실행 중 ────────────────────────────────
         if (!restartOnTrigger) {
-            console.log(`Job ${jobId} is in '${state}' state. Not allowed to run a new job.`);
+            // 종전에는 여기서 항목을 버렸다. 사용자의 입력이 트리거 단어를 우연히
+            // 포함한 답변이었다면 그 답변이 통째로 사라진다("다시시작" 은 흔한 표현이다).
+            // 버리지 말고 에이전트에게 전달한다. 진짜 재시작 요청이었다면 에이전트가
+            // 이해하지 못했다고 답하므로, 최소한 침묵보다는 낫다.
+            console.log(
+                `Job ${jobId} is in '${state}' state. 재시작이 꺼져 있어 메시지를 에이전트로 전달합니다.`);
             await app.createConversationAndSendMessage(item.id, appMessage5);
+            MSGQUEUE.msgQueue.enqueue(item.id, item.response);
             return;
         }
 
@@ -676,7 +734,10 @@ async function tryProcessRun() {
             console.error(
                 `[${new Date().toLocaleString()}] ❌ Job ${jobId} 종료를 ` +
                 `${maxRestartConfirmRounds}주기 동안 확인하지 못했습니다. 재시작을 중단합니다.`);
-            await app.createConversationAndSendMessage(item.id, appMessage5);
+            // 중지는 이미 요청됐다. 이 Job 은 곧 죽거나 이미 죽었으므로 매핑을 남기면
+            // 이후 사용자의 답변이 죽은 세션으로 계속 webhook 된다.
+            JOBTABLE.table.deleteJob(item.id);
+            await app.createConversationAndSendMessage(item.id, appMessage9);
             return;
         }
 
@@ -715,14 +776,18 @@ teamsAppServer.listen(appPort, async () => {
     console.log(`\n[${new Date().toLocaleString()}] UiPath와의 통신 준비 완료.\n`);
     triggerUipathTokenRenewal();
     triggerProcessRun();
-    app.ready = true;
+    app.uipathReady = true;
 });
 
 // Teams App 헬스체크 엔드포인트
 teamsAppServer.get('/', async (req, res) => {
     // [D-10] 종전에는 어떤 상황에서도 200을 반환해 준비되지 않은 상태를 감지할 수 없었다.
-    if (!app.ready || !app.uipathToken) {
+    if (!app.uipathReady || !app.uipathToken) {
         res.send(503, 'UiPath 연동이 준비되지 않았습니다.');
+        return;
+    }
+    if (!app.schedulerHealthy) {
+        res.send(503, '스케줄러가 정상 상태가 아닙니다.');
         return;
     }
     res.send('에이전트가 실행 중입니다.');
@@ -762,7 +827,11 @@ teamsAppServer.post('/api/sendMessage', apiKeyAuth, async (req, res) => {
     }
 
     try {
-        await app.createConversationAndSendMessage(userId, message);
+        const sent = await app.createConversationAndSendMessage(userId, message);
+        if (!sent) {
+            res.send(502, `사용자 ${userId}에게 메시지를 전송하지 못했습니다.`);
+            return;
+        }
         res.send(`사용자 ${userId}에게 메시지를 보냈습니다.`);
     } catch (err) {
         console.error(`[${new Date().toLocaleString()}] 엔드포인트 에러:`, err);

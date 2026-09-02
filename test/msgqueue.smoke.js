@@ -193,6 +193,45 @@ const check = (name, cond, detail = '') => {
             `실제 ${(m2.queue.get('u7') || []).length}건`);
     }
 
+    console.log('\n[10] 체인 대기 중 /reset → 첫 전송도 취소됨');
+    {
+        const delivered = [];
+        const saved = axiosMock.post;
+        // 첫 메시지 전송을 붙잡아 두 번째가 체인에서 대기하도록 만든다
+        let release;
+        const gate = new Promise(r => { release = r; });
+        let n = 0;
+        axiosMock.post = async (url, data) => {
+            n++;
+            if (n === 1) { await gate; }
+            delivered.push(data.message);
+            return { status: 200 };
+        };
+        msgQueue.reset('u8');
+        msgQueue.enqueue('u8', '첫메시지');
+        msgQueue.enqueue('u8', '대기중-옛세션');   // 체인 뒤에서 대기
+        await sleep(30);
+        msgQueue.reset('u8');                      // 대기 중에 세션 초기화
+        release();
+        await sleep(200);
+        axiosMock.post = saved;
+        check('대기 중이던 이전 세션 메시지가 전송되지 않음',
+            !delivered.includes('대기중-옛세션'), JSON.stringify(delivered));
+    }
+
+    console.log('\n[11] 잘못된 숫자 환경변수가 가드를 끄지 않음');
+    {
+        delete require.cache[require.resolve(MSGQUEUE_PATH)];
+        process.env.UiPathWebhookUrl = '';
+        process.env.MessageQueuePort = '18082';
+        process.env.MaxQueuePerUser = 'abc';       // 오타
+        const m3 = require(MSGQUEUE_PATH).msgQueue;
+        for (let i = 0; i < 40; i++) m3.enqueue('u9', `m${i}`);
+        await sleep(50);
+        check('오타 시 기본값 20 적용', (m3.queue.get('u9') || []).length <= 20,
+            `실제 ${(m3.queue.get('u9') || []).length}건`);
+    }
+
     console.log(`\n결과: ${pass} 통과 / ${fail} 실패\n`);
     process.exit(fail ? 1 : 0);
 })();

@@ -21,11 +21,26 @@ const uipathWebhookRetryAfter = process.env.UiPathWebhookRetryAfter || 1;
 
 // 소비되지 않는 큐가 무한히 자라지 않도록 하는 사용자별 상한.
 // (/dequeue 폴링은 webhook 도입으로 사용되지 않는다 — 잔재를 남겨두되 제한한다)
-const MAX_QUEUE_PER_USER = Number(process.env.MaxQueuePerUser || 20);
+// 숫자 환경변수는 반드시 이 헬퍼로 읽는다. '0' 은 truthy 문자열이라 || 가 동작하지 않고,
+// 오타는 NaN 이 되어 비교가 항상 false 가 된다. 어느 쪽이든 가드가 조용히 꺼진다.
+function numEnv(name, def, min = 1) {
+    const n = Number(process.env[name]);
+    if (!Number.isFinite(n) || n < min) {
+        if (process.env[name] !== undefined) {
+            console.error(
+                `[${new Date().toLocaleString()}] ⚠️ ${name}='${process.env[name]}' 은(는) 유효하지 않습니다. ` +
+                `기본값 ${def} 을(를) 사용합니다.`);
+        }
+        return def;
+    }
+    return n;
+}
+
+const MAX_QUEUE_PER_USER = numEnv('MaxQueuePerUser', 20);
 
 // HTTP 타임아웃. axios 기본값 0(무한)이면 응답 없는 소켓 하나가 해당 사용자의
 // 전송 체인을 영구히 막는다. 그 사용자는 이후 아무 메시지도 전달되지 않는다.
-const webhookHttpTimeout = Number(process.env.WebhookHttpTimeoutMs || 15000);
+const webhookHttpTimeout = numEnv('WebhookHttpTimeoutMs', 15000, 1000);
 
 // API Key Authentication
 const apiKeyAuth = (req, res, next) => {
@@ -104,6 +119,9 @@ class MessageQueue {
 
     reset(id) {
         this.queue.set(id, []);
+        // 세대를 올리면 대기 중이거나 재시도 중인 이전 세션 메시지가 _send 진입/재시도
+        // 시점에 스스로 취소된다. sendChains 는 그대로 두어도 무방하다 —
+        // 체인의 각 단계가 세대를 확인하고 빠져나간다.
         this.generation.set(id, (this.generation.get(id) || 0) + 1);
     }
 
@@ -133,6 +151,16 @@ class MessageQueue {
     }
 
     async _send(id, message, gen) {
+
+        // 전송은 사용자별 체인 뒤에서 대기하므로, enqueue 시점과 실제 전송 시점 사이에
+        // /reset 이 끼어들 수 있다. 재시도 직전뿐 아니라 첫 전송 직전에도 확인해야
+        // 이전 세션의 답변이 새 세션으로 배달되는 것을 막을 수 있다.
+        if (this.generation.get(id) !== gen) {
+            console.error(
+                `[${new Date().toLocaleString()}] ⚠️ 전송 대기 중 세션이 초기화되어 취소합니다. ` +
+                `사용자 '${id}'`);
+            return;
+        }
 
         const messageId = crypto.randomUUID();
 
