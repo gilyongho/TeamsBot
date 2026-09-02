@@ -63,11 +63,7 @@ class MessageQueue {
     }
 
     reset(id) {
-        if (!this.queue.has(id)) {
-            return;
-        } else {
-            this.queue.set(id, []);
-        }
+        this.queue.set(id, []);
     }
 
     enqueue(id, message) {
@@ -76,36 +72,64 @@ class MessageQueue {
             this.queue.set(id, []);
         }
 
-        if (uipathWebhookUrl) {
-            // UiPath Webhook URL로 알림
-            const postData = {
-                user_id: id,
-                message: message
-            };
-            const postConfig = {
-                headers: {
-                    'Content-Type': 'application/json',
-                    [uipathWebhookFormat]: uipathWebhookKey
-                }
-            };
-
-            axios.post(uipathWebhookUrl, postData, postConfig)
-            .then(response => {
-                console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 알림 성공.`);
-            })
-            .catch(error => {
-                if (error.response) {
-                    console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook 알림 실패:`);
-                    console.error(`   - Status: ${error.response.status}`);
-                    console.error(`   - Data: ${JSON.stringify(error.response.data)}`);
-                } else {
-                    console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook 알림 실패:`);
-                    console.error(`   - Message: ${error.message}`);
-                }
-            });
-        } else {
-            console.log('Webhook URL is empty!');
+        // [R-1] Webhook 미설정 시에도 메시지를 잃지 않도록 큐에 적재한다.
+        if (!uipathWebhookUrl) {
+            console.log(`[${new Date().toLocaleString()}] Webhook URL is empty! 메시지를 큐에 적재합니다.`);
+            this.queue.get(id).push(message);
+            return;
         }
+
+        // [R-1] 수신측 중복 제거용 식별자. 로그 추적에도 사용한다.
+        const messageId = crypto.randomUUID();
+
+        const postData = {
+            user_id: id,
+            message: message,
+            message_id: messageId
+        };
+
+        const postConfig = {
+            headers: {
+                'Content-Type': 'application/json',
+                [uipathWebhookFormat]: uipathWebhookKey
+            }
+        };
+
+        const logError = (phase, error) => {
+            console.error(`[${new Date().toLocaleString()}] ❌ UiPath Webhook ${phase} 알림 실패: [msg:${messageId}]`);
+            if (error.response) {
+                console.error(`   - Status: ${error.response.status}`);
+                console.error(`   - Data: ${JSON.stringify(error.response.data)}`);
+            } else if (error.request) {
+                console.error('   - Error: No response received from UiPath API.');
+            } else {
+                console.error(`   - Error: ${error.message}`);
+            }
+        };
+
+        // 1차 알림
+        axios.post(uipathWebhookUrl, postData, postConfig)
+        .then(() => {
+            console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 1차 알림 성공. [msg:${messageId}]`);
+            // 성공하면 여기서 끝. 2차를 보내지 않는다.
+        })
+        .catch(error => {
+            logError('1차', error);
+
+            // [R-1] 1차가 실패한 경우에만 재시도한다.
+            setTimeout(() => {
+                axios.post(uipathWebhookUrl, postData, postConfig)
+                .then(() => {
+                    console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 2차 알림 성공. [msg:${messageId}]`);
+                })
+                .catch(err2 => {
+                    logError('2차', err2);
+                    // [R-1] 최종 실패 시에만 큐에 적재한다. (/dequeue 폴링 fallback)
+                    this.queue.get(id).push(message);
+                    console.error(`[${new Date().toLocaleString()}] ⚠️ 메시지를 큐에 적재했습니다. [msg:${messageId}]`);
+                });
+            }, Number(uipathWebhookRetryAfter) * 1000);
+        });
     }
 
     dequeue(id) {
