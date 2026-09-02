@@ -64,6 +64,23 @@ schedulers are running. Before that, or after a token renewal fails, it returns
 - Set `RestartOnTrigger=false` to restore the previous behaviour where a trigger
   keyword typed during a running job is refused instead of restarting it.
 
+## Message delivery and the vestigial queue
+
+The original design accumulated messages in `MessageQueue` and let the Maestro process
+consume them one at a time through `/dequeue`. That was abandoned because a Maestro process
+could not stay running long enough, and delivery moved to a webhook that reaches the process
+directly. **Nothing polls `/dequeue` any more.**
+
+That matters for failure handling. Pushing an undelivered message onto the queue is *not*
+preservation — no one takes it out. So when both webhook attempts fail, the server now tells
+the user (`AppMessage7`) so they can re-send. The queue push is kept only as a backstop in
+case something still polls, and is capped at `MaxQueuePerUser` so an unconsumed queue cannot
+grow without bound.
+
+The second webhook, added earlier because a customer reported missing replies, was sent
+unconditionally on the assumption that the receiver would ignore the duplicate. It did not —
+that assumption is what produced the incident this branch fixes.
+
 ## Orchestrator URL path
 
 The canonical path is `{domain}/{org}/{tenant}/{service}/odata/...`, where `{service}` is

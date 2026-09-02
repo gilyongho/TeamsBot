@@ -83,15 +83,35 @@ const check = (name, cond, detail = '') => {
     check('두 요청의 message_id 가 동일',
         calls[0].data.message_id === calls[1].data.message_id);
 
-    console.log('\n[3] 1차·2차 모두 실패 → 큐에 보존  (R-1 핵심)');
-    mode = 'fail'; calls = []; msgQueue.reset('u1');
-    msgQueue.enqueue('u1', '발송해줘');
-    await sleep(300);
-    check('발송 2회', calls.length === 2, `실제 ${calls.length}회`);
-    check('메시지가 큐에 보존됨',
-        queued('u1').length === 1 && queued('u1')[0] === '발송해줘',
-        JSON.stringify(queued('u1')));
-    check('dequeue 로 회수 가능', msgQueue.dequeue('u1') === '발송해줘');
+    console.log('\n[3] 1차·2차 모두 실패 → 사용자에게 안내  (R-1 핵심)');
+    {
+        const notified = [];
+        msgQueue.setFailureHandler(async (id, msg, msgId) => {
+            notified.push({ id, msg, msgId });
+        });
+        mode = 'fail'; calls = []; msgQueue.reset('u1');
+        msgQueue.enqueue('u1', '발송해줘');
+        await sleep(300);
+        check('발송 2회', calls.length === 2, `실제 ${calls.length}회`);
+        check('사용자에게 전달 실패가 통지됨',
+            notified.length === 1 && notified[0].id === 'u1' && notified[0].msg === '발송해줘',
+            JSON.stringify(notified));
+        check('통지에 message_id 포함', !!notified[0].msgId);
+        check('큐에도 남김 (폴링 backstop 대비)', queued('u1').length === 1);
+        msgQueue.dequeue('u1');
+        msgQueue.setFailureHandler(null);
+    }
+
+    console.log('\n[3-b] 큐가 무한히 자라지 않음');
+    {
+        msgQueue.setFailureHandler(async () => {});
+        mode = 'fail'; msgQueue.reset('u5');
+        for (let i = 0; i < 25; i++) msgQueue.enqueue('u5', `m${i}`);
+        await sleep(2500);
+        check('사용자별 상한 20 이하 유지',
+            queued('u5').length <= 20, `실제 ${queued('u5').length}건`);
+        msgQueue.setFailureHandler(null);
+    }
 
     console.log('\n[4] Webhook URL 미설정 → 소실 없이 큐 적재');
     msgQueue.reset('u2');

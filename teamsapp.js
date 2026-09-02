@@ -54,6 +54,13 @@ const restartOnTrigger = String(process.env.RestartOnTrigger ?? 'true').toLowerC
 //   대화형 에이전트는 사용자 입력 대기 중 정지 지점에 도달하지 못할 수 있어 Kill이 기본값.
 const stopStrategy = process.env.JobStopStrategy || 'Kill';
 
+// 메시지 전달 최종 실패 안내.
+//   큐(/dequeue 폴링)는 webhook 도입 이전 설계의 잔재이고 지금은 폴링하는 주체가 없다.
+//   따라서 전달에 실패한 답변은 사용자가 다시 입력하는 수밖에 없다. 알리지 않으면
+//   사용자는 영문도 모르고 기다린다.
+const appMessage7 = process.env.AppMessage7
+    || '죄송합니다. 방금 입력하신 내용을 처리하지 못했습니다.<br>잠시 후 다시 입력해주세요.';
+
 // [D-15] 재시작 안내 메시지
 const appMessage6 = process.env.AppMessage6
     || '진행 중이던 작업을 종료하고 처음부터 다시 시작합니다.<br>잠시만 기다려주세요.';
@@ -360,6 +367,14 @@ class TeamsApp extends TeamsActivityHandler {
 
 // Teams App 인스턴스 생성
 const app = new TeamsApp();
+
+// webhook 전달이 최종 실패했을 때 사용자에게 알린다.
+// msgqueue.js 는 Teams 로 발신할 수단이 없으므로 여기서 주입한다.
+MSGQUEUE.msgQueue.setFailureHandler(async (userId, message, messageId) => {
+    console.error(
+        `[${new Date().toLocaleString()}] 사용자 '${userId}' 에게 전달 실패를 안내합니다. [msg:${messageId}]`);
+    await app.createConversationAndSendMessage(userId, appMessage7);
+});
 
 // Teams App REST 서버 생성
 const serverOptions = {
