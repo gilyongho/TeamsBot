@@ -59,7 +59,17 @@ const appMessage6 = process.env.AppMessage6
     || '진행 중이던 작업을 종료하고 처음부터 다시 시작합니다.<br>잠시만 기다려주세요.';
 
 // [D-8] Job 상태 조회 연속 실패 허용 횟수
-const maxStateCheckRetry = Number(process.env.MaxStateCheckRetry || 3);
+const maxStateCheckRetry = (() => {
+    const n = Number(process.env.MaxStateCheckRetry);
+    return Number.isFinite(n) && n >= 1 ? n : 3;   // '0'/'abc' 는 가드를 무력화하므로 기본값으로
+})();
+
+// [D-15] 중지 확인이 끝나지 않을 때 포기하기까지의 주기 수
+const maxRestartConfirmRounds = 3;
+
+// [D-15] 방금 기동한 Job 을 중복 트리거가 다시 죽이지 않도록 하는 쿨다운
+const RESTART_COOLDOWN_MS = Number(process.env.RestartCooldownMs || 15000);
+const lastJobStartedAt = new Map();
 
 // [D-15] 중지 후 실제 종료 확인 폴링
 const STOP_CONFIRM_TRIES = 5;
@@ -365,9 +375,25 @@ function triggerUipathTokenRenewal() {
                 app.ready = true;
                 console.log(`[${new Date().toLocaleString()}] ✅ UiPath 인증 토큰 갱신 성공.\n`);
             } else {
-                // [D-10] 갱신 실패 상태를 헬스체크에 반영한다.
-                app.ready = false;
-                console.error(`[${new Date().toLocaleString()}] ❌ UiPath 인증 토큰 갱신 실패.\n`);
+                // 갱신 주기는 약 59분이다. 한 번의 일시적 실패로 한 시간 동안
+                // 서비스를 내리지 않도록, ready 를 내리기 전에 짧게 재시도한다.
+                console.error(`[${new Date().toLocaleString()}] ❌ UiPath 인증 토큰 갱신 실패. 재시도합니다.`);
+
+                let recovered = null;
+                for (let i = 1; i <= 3 && !recovered; i++) {
+                    await new Promise(r => setTimeout(r, i * 5000));
+                    recovered = await UIPATH.getAccessToken();
+                }
+
+                if (recovered) {
+                    app.uipathToken = recovered;
+                    app.ready = true;
+                    console.log(`[${new Date().toLocaleString()}] ✅ UiPath 인증 토큰 재시도 성공.\n`);
+                } else {
+                    // [D-10] 갱신 실패 상태를 헬스체크에 반영한다.
+                    app.ready = false;
+                    console.error(`[${new Date().toLocaleString()}] ❌ UiPath 인증 토큰 갱신 최종 실패.\n`);
+                }
             }
         },
         (app.uipathToken.expiry - 60) * 1000 // 만료 1분 전에 갱신 시도
@@ -397,10 +423,12 @@ async function runProcess(item) {
 
     if (jobId) {
         JOBTABLE.table.setJob(item.id, jobId);
+        lastJobStartedAt.set(item.id, Date.now());
+        return jobId;
     } else {
         // 기동 실패 시 종전에는 아무 안내가 없어 사용자가 "준비중입니다" 상태로 방치됐다.
-        console.error(`[${new Date().toLocaleString()}] ❌ 프로세스 기동 실패. 사용자에게 안내합니다.`);
-        await app.createConversationAndSendMessage(item.id, appMessage1);
+        console.error(`[${new Date().toLocaleString()}] ❌ 프로세스 기동 실패.`);
+        return null;
     }
 }
 
@@ -442,7 +470,7 @@ async function tryProcessRun() {
                 console.error(
                     `[${new Date().toLocaleString()}] ⚠️ Job ${jobId} 상태 확인 실패 ` +
                     `(${item.stateCheckRetry}/${maxStateCheckRetry}). 기동을 보류하고 재시도합니다.`);
-                PROCQUEUE.queue.putBack(item);
+                PROCQUEUE.queue.enqueue(item);   // 뒤로 보내 다른 사용자를 막지 않는다
                 return;
             }
 
@@ -472,6 +500,17 @@ async function tryProcessRun() {
         }
 
         // ── [D-15] 기존 Job을 중지하고 새로 기동한다 ──────────
+        // 방금 기동한 Job 이라면 중복 트리거(더블탭·Bot Framework 재전송)일 가능성이
+        // 높다. 죽이지 않고 안내만 한다.
+        const startedAt = lastJobStartedAt.get(item.id) || 0;
+        if (!item.stopRequested && Date.now() - startedAt < RESTART_COOLDOWN_MS) {
+            console.log(
+                `[${new Date().toLocaleString()}] Job ${jobId} 는 방금 기동됐습니다. ` +
+                `중복 트리거로 보고 재시작하지 않습니다.`);
+            await app.createConversationAndSendMessage(item.id, appMessage5);
+            return;
+        }
+
         if (!item.stopRequested) {
             console.log(`[${new Date().toLocaleString()}] 재시작 요청 — Job ${jobId} 중지를 시도합니다.`);
 
@@ -484,7 +523,7 @@ async function tryProcessRun() {
                     console.error(
                         `[${new Date().toLocaleString()}] ⚠️ Job ${jobId} 중지 실패 ` +
                         `(${item.restartRetry}/3). 재시도합니다.`);
-                    PROCQUEUE.queue.putBack(item);   // 메시지를 버리지 않는다
+                    PROCQUEUE.queue.enqueue(item);   // 메시지를 버리지 않되 뒤로 보낸다
                 } else {
                     console.error(`[${new Date().toLocaleString()}] ❌ Job ${jobId} 중지를 3회 실패했습니다.`);
                     await app.createConversationAndSendMessage(item.id, appMessage5);
@@ -502,26 +541,57 @@ async function tryProcessRun() {
 
         // 종료가 실제로 반영될 때까지 짧게 확인한다.
         // 확인 없이 곧바로 기동하면 같은 대화에 두 Job이 붙는 상황이 재현될 수 있다.
+        //
+        // 상태를 읽지 못한 것(!s)은 '종료됨'이 아니다. getJobState 는 5xx·타임아웃·
+        // 만료 토큰 모두에 대해 null 을 반환한다. 위 D-8 분기가 바로 그 이유로
+        // 기동을 보류하는데, 여기서 종료로 간주하면 같은 결함이 다시 생긴다.
         let confirmed = false;
         for (let i = 0; i < STOP_CONFIRM_TRIES; i++) {
             await sleep(STOP_CONFIRM_INTERVAL_MS);
             const s = await UIPATH.getJobState(app.uipathToken.token, jobId);
-            if (!s || isTerminal(s)) {
+            if (s && isTerminal(s)) {
                 confirmed = true;
                 break;
             }
         }
 
         if (!confirmed) {
+            item.confirmRound = (item.confirmRound || 0) + 1;
+
+            if (item.confirmRound < maxRestartConfirmRounds) {
+                console.error(
+                    `[${new Date().toLocaleString()}] ⚠️ Job ${jobId} 종료가 확인되지 않았습니다 ` +
+                    `(${item.confirmRound}/${maxRestartConfirmRounds}). 중지를 다시 요청합니다.`);
+                item.stopRequested = false;          // 다음 주기에 Kill 을 재발행한다
+                PROCQUEUE.queue.enqueue(item);       // 뒤로 보내 다른 사용자를 막지 않는다
+                return;
+            }
+
+            // 포기 — 항목을 큐 맨 앞에 붙들어 두면 모든 사용자가 정지한다.
             console.error(
-                `[${new Date().toLocaleString()}] ⚠️ Job ${jobId}가 아직 종료되지 않았습니다. ` +
-                `다음 주기에 다시 확인합니다.`);
-            PROCQUEUE.queue.putBack(item);
+                `[${new Date().toLocaleString()}] ❌ Job ${jobId} 종료를 ` +
+                `${maxRestartConfirmRounds}주기 동안 확인하지 못했습니다. 재시작을 중단합니다.`);
+            await app.createConversationAndSendMessage(item.id, appMessage5);
             return;
         }
 
         JOBTABLE.table.deleteJob(item.id);
-        await runProcess(item);
+
+        // 기동에 실패하면 사용자는 세션도 잃고 새 세션도 못 얻는다. 되돌려 재시도한다.
+        const newJobId = await runProcess(item);
+        if (!newJobId) {
+            item.startRetry = (item.startRetry || 0) + 1;
+            if (item.startRetry < 3) {
+                console.error(
+                    `[${new Date().toLocaleString()}] ⚠️ 재시작 후 기동 실패 ` +
+                    `(${item.startRetry}/3). 다음 주기에 재시도합니다.`);
+                item.stopRequested = false;
+                item.confirmRound = 0;
+                PROCQUEUE.queue.enqueue(item);
+            } else {
+                await app.createConversationAndSendMessage(item.id, appMessage1);
+            }
+        }
 
     } finally {
         processRunInFlight = false;

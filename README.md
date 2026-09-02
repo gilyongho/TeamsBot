@@ -62,6 +62,13 @@ schedulers are running. Before that, or after a token renewal fails, it returns
 - Set `RestartOnTrigger=false` to restore the previous behaviour where a trigger
   keyword typed during a running job is refused instead of restarting it.
 
+## Trigger keywords
+
+`ProcessTriggerKeywords` must contain **commands**, not business vocabulary. Matching is
+substring-after-whitespace-removal, so a keyword like `거래선` fires on any answer that
+happens to contain the word — and with `RestartOnTrigger=true` that kills the live session
+and starts over. Keep them to explicit start phrases.
+
 ## Known remaining items
 
 | Item | Note |

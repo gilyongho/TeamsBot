@@ -106,6 +106,39 @@ const check = (name, cond, detail = '') => {
     msgQueue.reset('brand-new-user');
     check('빈 배열 생성됨', Array.isArray(msgQueue.queue.get('brand-new-user')));
 
+    console.log('\n[6] 순서 보장 — 1차 실패한 메시지가 뒤 메시지를 추월하지 않음');
+    {
+        const order = [];
+        let n = 0;
+        const saved = axiosMock.post;
+        axiosMock.post = (url, data) => {
+            n++;
+            if (n === 1) return Promise.reject({ message: 'first send fails' });
+            order.push(data.message);
+            return Promise.resolve({ status: 200 });
+        };
+        msgQueue.reset('u3');
+        msgQueue.enqueue('u3', '답변1');
+        msgQueue.enqueue('u3', '답변2');
+        await sleep(400);
+        axiosMock.post = saved;
+        check('답변1 이 답변2 보다 먼저 도착',
+            order[0] === '답변1' && order[1] === '답변2',
+            `실제 순서 ${JSON.stringify(order)}`);
+    }
+
+    console.log('\n[7] reset 이후 지난 세션의 재시도 결과가 새 큐를 오염시키지 않음');
+    {
+        mode = 'fail'; msgQueue.reset('u4');
+        msgQueue.enqueue('u4', '옛세션의 답변');
+        await sleep(20);
+        msgQueue.reset('u4');          // 재시도 도중 새 세션 시작
+        await sleep(400);
+        check('새 세션 큐가 비어 있음',
+            queued('u4').length === 0,
+            JSON.stringify(queued('u4')));
+    }
+
     console.log(`\n결과: ${pass} 통과 / ${fail} 실패\n`);
     process.exit(fail ? 1 : 0);
 })();

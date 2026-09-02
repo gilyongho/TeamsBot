@@ -52,6 +52,16 @@ const apiKeyAuth = (req, res, next) => {
 class MessageQueue {
     constructor() {
         this.queue = new Map();
+
+        // 사용자별 직렬 전송 체인.
+        //   재시도가 setTimeout 이면 실패한 메시지가 뒤에 온 메시지보다 늦게 도착해
+        //   순차 질의응답 에이전트가 답변 순서를 뒤바꿔 소비한다. 사용자 단위로
+        //   앞 전송이 끝난 뒤에 다음 전송을 시작해 순서를 보장한다.
+        this.sendChains = new Map();
+
+        // reset 세대. 재시도 도중 /reset 이 호출되면 그 메시지는 이전 세션의
+        //   것이므로 새 세션 큐에 넣으면 안 된다.
+        this.generation = new Map();
     }
 
     isEmpty(id) {
@@ -64,6 +74,7 @@ class MessageQueue {
 
     reset(id) {
         this.queue.set(id, []);
+        this.generation.set(id, (this.generation.get(id) || 0) + 1);
     }
 
     enqueue(id, message) {
@@ -71,15 +82,26 @@ class MessageQueue {
         if (!this.queue.has(id)) {
             this.queue.set(id, []);
         }
+        if (!this.generation.has(id)) {
+            this.generation.set(id, 0);
+        }
 
-        // [R-1] Webhook 미설정 시에도 메시지를 잃지 않도록 큐에 적재한다.
+        // Webhook 미설정 시에도 메시지를 잃지 않도록 큐에 적재한다.
         if (!uipathWebhookUrl) {
             console.log(`[${new Date().toLocaleString()}] Webhook URL is empty! 메시지를 큐에 적재합니다.`);
             this.queue.get(id).push(message);
             return;
         }
 
-        // [R-1] 수신측 중복 제거용 식별자. 로그 추적에도 사용한다.
+        // 같은 사용자의 이전 전송이 끝난 뒤에 보낸다. (순서 보장)
+        const gen = this.generation.get(id);
+        const prev = this.sendChains.get(id) || Promise.resolve();
+        const next = prev.then(() => this._send(id, message, gen)).catch(() => {});
+        this.sendChains.set(id, next);
+    }
+
+    async _send(id, message, gen) {
+
         const messageId = crypto.randomUUID();
 
         const postData = {
@@ -107,29 +129,36 @@ class MessageQueue {
             }
         };
 
-        // 1차 알림
-        axios.post(uipathWebhookUrl, postData, postConfig)
-        .then(() => {
+        try {
+            await axios.post(uipathWebhookUrl, postData, postConfig);
             console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 1차 알림 성공. [msg:${messageId}]`);
-            // 성공하면 여기서 끝. 2차를 보내지 않는다.
-        })
-        .catch(error => {
+            return;
+        } catch (error) {
             logError('1차', error);
+        }
 
-            // [R-1] 1차가 실패한 경우에만 재시도한다.
-            setTimeout(() => {
-                axios.post(uipathWebhookUrl, postData, postConfig)
-                .then(() => {
-                    console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 2차 알림 성공. [msg:${messageId}]`);
-                })
-                .catch(err2 => {
-                    logError('2차', err2);
-                    // [R-1] 최종 실패 시에만 큐에 적재한다. (/dequeue 폴링 fallback)
-                    this.queue.get(id).push(message);
-                    console.error(`[${new Date().toLocaleString()}] ⚠️ 메시지를 큐에 적재했습니다. [msg:${messageId}]`);
-                });
-            }, Number(uipathWebhookRetryAfter) * 1000);
-        });
+        // 1차가 실패한 경우에만 재시도한다.
+        await new Promise(r => setTimeout(r, Number(uipathWebhookRetryAfter) * 1000));
+
+        try {
+            await axios.post(uipathWebhookUrl, postData, postConfig);
+            console.log(`[${new Date().toLocaleString()}] ✅ UiPath Webhook 2차 알림 성공. [msg:${messageId}]`);
+            return;
+        } catch (error) {
+            logError('2차', error);
+        }
+
+        // 재시도 중 /reset 이 호출됐다면 이 메시지는 이전 세션의 것이다.
+        // 새 세션 큐에 넣으면 다음 대화의 첫 dequeue 가 엉뚱한 답변을 가져간다.
+        if (this.generation.get(id) !== gen) {
+            console.error(
+                `[${new Date().toLocaleString()}] ⚠️ 이전 세션의 메시지이므로 큐에 넣지 않고 버립니다. ` +
+                `[msg:${messageId}]`);
+            return;
+        }
+
+        this.queue.get(id).push(message);
+        console.error(`[${new Date().toLocaleString()}] ⚠️ 메시지를 큐에 적재했습니다. [msg:${messageId}]`);
     }
 
     dequeue(id) {
