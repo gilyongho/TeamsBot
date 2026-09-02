@@ -138,6 +138,15 @@ async function runProcess(token, inputArguments) {
 }
 
 // 가용한 런타임 수를 반환한다. (총 Unattended 슬롯 - UsedRuntimes)
+//
+// [D-7] 주의 — 현재 호출부가 없다 (커밋 312ff30에서 런타임 검사 제거).
+//   아래 두 조회의 범위가 서로 다르다:
+//     - Machines 조회: 폴더 헤더 없음 → 테넌트 범위의 UnattendedSlots
+//     - Jobs 조회    : 폴더 헤더 있음 → 폴더 범위의 Running Job
+//   분모는 테넌트, 분자는 폴더이므로 다른 폴더가 같은 머신을 쓰면 가용량이
+//   과대 산정된다. 또한 사용량 판별이 HostMachineName 길이(LongNameLength)
+//   휴리스틱이라 머신 이름 규칙이 바뀌면 조용히 오작동한다.
+//   재사용하기 전에 MachineId 기준 필터로 교체할 것.
 async function getAvailableRuntimes(token) {
 
     if (!token) {
@@ -251,9 +260,49 @@ async function getJobState(token, jobId) {
     }
 }
 
+// [D-15] job을 중지시킨다. strategy: 'Kill' | 'SoftStop'
+// SoftStop은 프로세스가 정지 지점에 도달해야 멈추는데, 사용자 입력을 기다리는
+// 대화형 에이전트는 그 지점에 도달하지 못할 수 있어 Kill을 기본값으로 둔다.
+async function stopJob(token, jobId, strategy = 'Kill') {
+
+    if (!token) {
+        console.error(`[${new Date().toLocaleString()}] UiPath 인증 토큰이 없습니다. Job을 중지할 수 없습니다.`);
+        return false;
+    }
+
+    const apiUrl = `${uipathBaseURL}/${uipathOrganizationName}/${uipathTenantName}`
+                 + `/odata/Jobs(${jobId})/UiPath.Server.Configuration.OData.StopJob`;
+
+    try {
+        await axios.post(apiUrl, { strategy: strategy }, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'X-UIPATH-OrganizationUnitId': uipathFolderId
+            }
+        });
+
+        console.log(`[${new Date().toLocaleString()}] ✅ Job ${jobId} 중지 요청 성공 (${strategy}).`);
+        return true;
+
+    } catch (error) {
+        console.error(`[${new Date().toLocaleString()}] ❌ Job ${jobId} 중지 실패:`);
+        if (error.response) {
+            console.error(`   - Status: ${error.response.status}`);
+            console.error(`   - Data: ${JSON.stringify(error.response.data)}`);
+        } else if (error.request) {
+            console.error('   - Error: No response received from UiPath API.');
+        } else {
+            console.error(`   - Error: ${error.message}`);
+        }
+        return false;
+    }
+}
+
 module.exports = {
     getAccessToken,
     runProcess,
     getAvailableRuntimes,
-    getJobState
+    getJobState,
+    stopJob
 };
