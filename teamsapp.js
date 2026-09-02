@@ -288,11 +288,16 @@ class TeamsApp extends TeamsActivityHandler {
 
     // Get OAuth token for Microsoft Graph API
     async getGraphToken() {
-        const credential = new ClientSecretCredential(
-            appTenantId,
-            appId,
-            appPassword
-        );
+        // 자격증명 객체를 매 호출마다 새로 만들면 @azure/identity 의 토큰 캐시가
+        // 전혀 동작하지 않아 메시지 한 건마다 AAD 토큰 요청이 나간다. 한 번만 만든다.
+        if (!this._graphCredential) {
+            this._graphCredential = new ClientSecretCredential(
+                appTenantId,
+                appId,
+                appPassword
+            );
+        }
+        const credential = this._graphCredential;
 
         try {
             const tokenResponse = await credential.getToken('https://graph.microsoft.com/.default');
@@ -307,29 +312,47 @@ class TeamsApp extends TeamsActivityHandler {
     }
 
     // Get user info
+    //   Graph 조회가 실패하면(AAD 스로틀링·일시 장애) 종전에는 예외가 그대로 올라가
+    //   onMessage 가 큐에 넣기 전에 중단됐다. 즉 사용자의 메시지가 통째로 사라졌다.
+    //   활동(activity)에 이미 들어있는 정보로 대체해 최소한 대화는 이어지게 한다.
     async getUserInfo(context) {
 
-        const token = await this.getGraphToken();
-
-        const client = Client.init({
-            authProvider: (done) => {
-                done(null, token);
-            }
-        });
-
-        const user = await client
-            .api(`/users/${context.activity.from.aadObjectId}`)
-            .select('id,displayName,mail,userPrincipalName,department,jobTitle,officeLocation')
-            .get();
-        
-        return {
-            id: user.id,
-            name: user.displayName,
-            email: user.mail || user.userPrincipalName,
-            //department: user.department,
-            //jobTitle: user.jobTitle,
-            //officeLocation: user.officeLocation
+        const from = context.activity.from || {};
+        const fallback = {
+            id: from.aadObjectId || from.id,
+            name: from.name || '',
+            email: ''
         };
+
+        try {
+            const token = await this.getGraphToken();
+
+            const client = Client.init({
+                authProvider: (done) => {
+                    done(null, token);
+                }
+            });
+
+            const user = await client
+                .api(`/users/${from.aadObjectId}`)
+                .select('id,displayName,mail,userPrincipalName,department,jobTitle,officeLocation')
+                .get();
+
+            return {
+                id: user.id,
+                name: user.displayName,
+                email: user.mail || user.userPrincipalName
+            };
+
+        } catch (error) {
+            console.error(
+                `[${new Date().toLocaleString()}] ⚠️ Graph 사용자 조회 실패. 활동 정보로 대체합니다: ` +
+                `${error.message}`);
+            if (!fallback.id) {
+                throw error;   // 식별자조차 없으면 진행할 수 없다
+            }
+            return fallback;
+        }
     }
 
     // Send message to the current user in conversation
