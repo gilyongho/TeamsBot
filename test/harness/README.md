@@ -104,8 +104,14 @@ H-5  webhook 무응답 → 타임아웃                       ✅
 `RestartOnTrigger=true` 로 바꾼 뒤 앱을 재기동하면 H-6 이 동작합니다.
 
 ```bash
-sed -i 's/^RestartOnTrigger=.*/RestartOnTrigger=true/' .env
-# 앱 재기동 후
+# 리눅스
+sed -i    's/^RestartOnTrigger=.*/RestartOnTrigger=true/' .env
+# macOS (BSD sed 는 -i 뒤에 빈 인자를 요구한다)
+sed -i '' 's/^RestartOnTrigger=.*/RestartOnTrigger=true/' .env
+
+pkill -f "node main.js"
+node main.js > /tmp/app.log 2>&1 &
+sleep 3
 bash test/harness/scenarios.sh
 ```
 
