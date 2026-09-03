@@ -46,8 +46,17 @@ const longNameLength = process.env.LongNameLength || 36;
 //   즉 위 401 은 "경로가 유효하다"는 신호이고, 두 형태 모두 실제로 유효하다.
 //   운영에서도 {service} 없는 형태로 StartJobs 가 201 을 받는다(8/31 로그).
 //
+//   2026-09-03, 별도 테넌트(Automation Cloud)에서 인증된 요청으로 재확인했다:
+//
+//     /{org}/{tenant}/odata/Folders                 → 200
+//     /{org}/{tenant}/orchestrator_/odata/Folders   → 200
+//
+//   Automation Suite 뿐 아니라 Automation Cloud 에서도 두 형태가 모두 200 이다.
+//   따라서 {service} 없는 형태는 이 배포의 특성이 아니라 플랫폼 공통으로 유효한
+//   형태이고, 기본값 '' 를 유지하는 것이 임시방편이 아니다.
+//
 //   기본값을 '' 로 두는 이유: 운영 중인 시스템의 URL 5개를 한꺼번에 바꾸지 않기
-//   위해서다. 정규 형태로 가려면 스테이징에서 확인한 뒤 .env 에 한 줄만 넣으면 된다.
+//   위해서다. 정규 형태로 가려면 .env 에 한 줄만 넣으면 된다.
 //     UiPathOrchestratorPath="orchestrator_"
 //   플랫폼 업그레이드로 {service} 없는 형태가 막히면 같은 한 줄로 복구된다.
 const uipathOrchestratorPath = process.env.UiPathOrchestratorPath || '';

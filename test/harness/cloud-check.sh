@@ -27,9 +27,13 @@ ENVF=${ENVF:-test/harness/env.cloud}
 DO_START_STOP=0
 [ "${1:-}" = "--start-stop" ] && DO_START_STOP=1
 
-pass=0; fails=0
+pass=0; fails=0; warns=0; gate_fail=0
 ok()   { pass=$((pass+1));  printf '  \033[32m✅\033[0m %s\n' "$1"; }
 no()   { fails=$((fails+1)); printf '  \033[31m❌\033[0m %s\n' "$1"; }
+warn() { warns=$((warns+1)); printf '  \033[33m⚠️\033[0m  %s\n' "$1"; }
+# RestartOnTrigger 를 켤지 결정하는 항목만 따로 센다.
+# Release·런타임은 --start-stop 의 전제일 뿐, 재시작 형식과 무관하다.
+gate()  { gate_fail=$((gate_fail+1)); }
 info() { printf '     \033[2m%s\033[0m\n' "$1"; }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
@@ -137,7 +141,7 @@ print(m[0]['FullyQualifiedName'] if m else '')")
 if [ -n "$FNAME" ]; then
     ok "폴더 $FID = '$FNAME'"
 else
-    no "폴더 $FID 을(를) 찾지 못했습니다"
+    no "폴더 $FID 을(를) 찾지 못했습니다"; gate
     info "$(printf '%s' "$FRES" | jq_ "print(', '.join(f\"{f['Id']}={f['FullyQualifiedName']}\" for f in d.get('value',[])))")"
 fi
 
@@ -156,8 +160,14 @@ import sys; sys.exit(0 if '$WANT' in names else 1)" \
             && ok "UiPathProcessName='$WANT' 이 목록에 있습니다" \
             || no "UiPathProcessName='$WANT' 이 목록에 없습니다 — 위 이름 중 하나로 맞추십시오"
     fi
+elif printf '%s' "$RRES" | jq_ "import sys; sys.exit(0 if isinstance(d.get('value'),list) else 1)"; then
+    # 200 + value:[] 는 조회 실패가 아니다. 폴더에 활성화된 프로세스가 없을 뿐이고,
+    # 이는 --start-stop 에만 영향을 준다. StopJobs 형식 확인(6번)과는 무관하다.
+    warn "폴더에 Release 가 없습니다 (@odata.count=0)"
+    info "Orchestrator 의 Deployments 가 Inactive 이면 Release 가 생기지 않습니다."
+    info "--start-stop 만 사용할 수 없고, 아래 6번 검증에는 영향이 없습니다."
 else
-    no "Release 를 가져오지 못했습니다"
+    no "Release 조회 실패 — 응답이 OData 형식이 아닙니다"
     info "$(printf '%s' "$RRES" | head -c 300)"
 fi
 
@@ -186,13 +196,16 @@ C=$(try_stop 999999999 Kill)
 BODY=$(head -c 200 /tmp/stopres.$$ 2>/dev/null); rm -f /tmp/stopres.$$
 printf '  jobIds=[999999999] strategy="Kill"  →  HTTP %s\n' "$C"
 case "$C" in
-    404) no "라우트가 없습니다 — UiPathOrchestratorPath 를 다시 확인하십시오" ;;
+    404) no "라우트가 없습니다 — UiPathOrchestratorPath 를 다시 확인하십시오"; gate ;;
     400) printf '  \033[33m⚠️\033[0m  400 — body 또는 strategy 표기 문제일 수 있습니다\n'
          info "$BODY"
          C2=$(try_stop 999999999 2); rm -f /tmp/stopres.$$
          printf '  jobIds=[999999999] strategy="2"     →  HTTP %s\n' "$C2"
-         [ "$C2" != "400" ] && no 'strategy 는 "Kill" 이 아니라 "2" 여야 합니다 → JobStopStrategy="2"' \
-                            || info '두 표기 모두 400 — 존재하지 않는 Job 때문일 수 있습니다' ;;
+         if [ "$C2" != "400" ]; then
+             no 'strategy 는 "Kill" 이 아니라 "2" 여야 합니다 → JobStopStrategy="2"'; gate
+         else
+             info '두 표기 모두 400 — 존재하지 않는 Job 때문일 수 있습니다'
+         fi ;;
     *)   ok "라우트와 body 형태가 수용되었습니다 (HTTP $C)"
          info "존재하지 않는 Job 이라 실제 중지는 일어나지 않았습니다." ;;
 esac
@@ -234,11 +247,18 @@ print(v[0]['Id'] if v else '')")
 fi
 
 # ── 결과 ─────────────────────────────────────────────────────
-printf '\n\033[1m결과: %d 통과 / %d 실패\033[0m\n' "$pass" "$fails"
-if [ "$fails" -eq 0 ]; then
+# RestartOnTrigger 가부는 gate 항목(토큰·경로·폴더·StopJobs)으로만 판단한다.
+# Release 나 런타임이 없는 것은 --start-stop 을 못 쓴다는 뜻일 뿐이다.
+printf '\n\033[1m결과: %d 통과 / %d 실패 / %d 경고\033[0m\n' "$pass" "$fails" "$warns"
+if [ "$gate_fail" -eq 0 ]; then
     printf '\033[1;32m실제 Orchestrator 가 이 코드의 요청 형태를 받아들입니다.\033[0m\n'
-    printf '고객 환경(Automation Suite)은 버전이 다를 수 있으니, 배포 창에서 같은 확인을 한 번 더 하십시오.\n\n'
+    printf '재시작 경로의 라우트·body·strategy 표기가 확정되었습니다.\n'
+    printf '\033[2m다만 존재하지 않는 Job 으로 확인한 것이라, 실제 Job 에 대한 Kill 의 효과까지\n'
+    printf '증명된 것은 아닙니다. 고객 환경(Automation Suite)은 버전도 다를 수 있으니,\n'
+    printf '배포 창에서 같은 확인을 한 번 더 하십시오.\033[0m\n\n'
+    [ "$warns" -gt 0 ] && printf '\033[33m경고 %d건은 --start-stop 에만 영향을 줍니다.\033[0m\n\n' "$warns"
+    exit 0
 else
-    printf '\033[1;31m위 실패 항목을 해결한 뒤 RestartOnTrigger=true 로 켜십시오.\033[0m\n\n'
+    printf '\033[1;31m재시작에 필요한 항목 %d건이 실패했습니다. RestartOnTrigger=false 로 두십시오.\033[0m\n\n' "$gate_fail"
     exit 1
 fi
