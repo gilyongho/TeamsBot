@@ -237,3 +237,25 @@ bash test/harness/cloud-check.sh --start-stop   # Job 기동 → Kill 까지
 **Automation Cloud 에서 통과해도 고객 Automation Suite 는 버전이 다를 수 있다.**
 "모른다"가 "거의 확실하다"로 바뀌는 것이지 확정은 아니다. 배포 창에서 같은 확인을
 한 번 더 하는 것을 권한다.
+
+## 어디서 돌릴 수 있나 — 우분투가 꼭 필요하지는 않다
+
+하네스가 요구하는 것은 **Node · curl · python3 · openssl** 뿐이다. 운영 서버의
+OS 동작이 아니라 애플리케이션 로직을 보는 도구이므로, macOS 에서도 리눅스
+컨테이너에서도 동일하게 돈다(이 저장소의 8/8 결과는 우분투가 아닌 컨테이너에서
+얻은 것이다). `preflight.sh` 도 `ss` / `lsof` / `netstat` 중 있는 것을 쓰고,
+`free` 가 없으면 메모리 검사만 건너뛴다.
+
+우분투가 의미를 갖는 것은 **배포 리허설**을 할 때다 — `npm install` 이 그 OS 에서
+되는지, systemd 로 띄웠을 때 문제가 없는지는 우분투에서만 확인된다.
+그 목적이라면 다음이 무료다.
+
+| 방법 | 성격 | 비고 |
+|---|---|---|
+| Multipass | 맥에 진짜 우분투 VM | `multipass launch --name tb 24.04` · 설치에 관리자 권한 필요 |
+| GitHub Codespaces | 브라우저 안의 우분투 | 개인 계정 무료 한도 · 로컬 설치 없음 · 사내망 프록시를 우회한다 |
+| Google Cloud Shell | 브라우저 안의 데비안 | 무료·신용카드 불필요 · 우분투는 아님 |
+| Podman / Colima | 맥 위의 컨테이너 | Docker Desktop 은 기업 사용 시 유료 |
+
+`cloud-check.sh` 는 `cloud.uipath.com` 으로 나가야 하므로, 사내망에서 TLS 검사
+프록시에 걸리면 Codespaces 쪽이 더 수월하다.

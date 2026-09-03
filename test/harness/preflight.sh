@@ -56,8 +56,18 @@ fi
 
 # ── 4. 포트가 비어 있는가 / 운영 포트와 겹치지 않는가 ─────────
 printf '\n\033[1m포트\033[0m\n'
-inuse() { (command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ":$1 ") \
-       || (command -v netstat >/dev/null && netstat -ltn 2>/dev/null | grep -q ":$1 "); }
+# ss(리눅스) / netstat / lsof(macOS) 중 있는 것을 쓴다.
+inuse() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | grep -q "[:.]$1 "
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -an 2>/dev/null | grep -q "[:.]$1 .*LISTEN"
+    else
+        return 1
+    fi
+}
 for p in 3979 8081 19000; do
     if inuse "$p"; then bad "포트 $p 사용 중" "하네스가 기동하지 못합니다."
     else ok "포트 $p 비어 있음"; fi
@@ -96,9 +106,14 @@ fi
 
 # ── 6. 자원 ───────────────────────────────────────────────────
 printf '\n\033[1m자원\033[0m\n'
-MEM=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}')
-if [ -n "${MEM:-}" ]; then
-    [ "$MEM" -gt 400 ] && ok "가용 메모리 ${MEM}MB" || bad "가용 메모리 ${MEM}MB" "Node 프로세스 추가에 최소 400MB 를 권장합니다."
+# free 는 리눅스 전용이다. macOS 등에서는 건너뛴다.
+if command -v free >/dev/null 2>&1; then
+    MEM=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}')
+    if [ -n "${MEM:-}" ]; then
+        [ "$MEM" -gt 400 ] && ok "가용 메모리 ${MEM}MB" || bad "가용 메모리 ${MEM}MB" "Node 프로세스 추가에 최소 400MB 를 권장합니다."
+    fi
+else
+    warn "메모리 확인 생략 (free 없음 — 리눅스가 아닙니다)"
 fi
 DISK=$(df -Pm . | awk 'NR==2{print $4}')
 [ "$DISK" -gt 500 ] && ok "가용 디스크 ${DISK}MB" || bad "가용 디스크 ${DISK}MB" "npm install 에 약 300MB 가 필요합니다."
