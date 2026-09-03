@@ -44,8 +44,26 @@ if [ ! -f "$ENVF" ]; then
     echo "   cp test/harness/env.cloud.example $ENVF   후 AppId / AppSecret 을 채우십시오."
     exit 1
 fi
-# shellcheck disable=SC1090
-set -a; . "$ENVF"; set +a
+# .env 형식을 셸로 source 하면 값 안의 $ ` " 가 해석된다. App Secret 은 그런 문자를
+# 자주 포함하므로(실제로 '$r7G' 때문에 unbound variable 로 죽었다), 해석하지 않고
+# 따옴표만 벗겨서 읽는다. 파일에 있는 임의의 셸 코드가 실행되는 것도 함께 막힌다.
+load_env() {
+    local line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*|*[!=]*) : ;; esac
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) : ;; *) continue ;; esac
+        key=${line%%=*}
+        val=${line#*=}
+        case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+        case "$val" in
+            \"*\") val=${val#\"}; val=${val%\"} ;;
+            \'*\') val=${val#\'}; val=${val%\'} ;;
+        esac
+        printf -v "$key" '%s' "$val"
+    done < "$1"
+}
+load_env "$ENVF"
 
 for v in UiPathBaseURL UiPathOrganizationName UiPathTenantName UiPathFolderId UiPathAppId UiPathAppSecret; do
     if [ -z "${!v:-}" ]; then echo "❌ $ENVF 에 $v 가 비어 있습니다."; exit 1; fi
