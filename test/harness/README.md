@@ -234,7 +234,7 @@ bash test/harness/cloud-check.sh --start-stop   # Job 기동 → Kill 까지
    — 운영은 앞 형태로 동작한다. 그것이 관례인지 그 환경 특성인지 여기서 갈린다
 3. 폴더 헤더 `X-UIPATH-OrganizationUnitId`
 4. `StartJobs` 의 `ReleaseName` 전략과 폴더 안의 실제 Release 이름
-5. **`StopJobs` 의 라우트·body·`strategy` 표기** ← 마지막 미검증 경로
+5. **`StopJobs` 의 라우트·body·`strategy` 표기** — 2026-09-03 확정 (Cloud·고객 Suite 양쪽 200)
 6. `--start-stop` 을 주면 Job 을 실제로 띄우고 Kill 해 `Stopped` 전이까지 확인
 
 토큰과 시크릿은 출력하지 않는다. 6번은 존재하지 않는 Job ID 로 먼저 던져서,

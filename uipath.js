@@ -55,6 +55,10 @@ const longNameLength = process.env.LongNameLength || 36;
 //   따라서 {service} 없는 형태는 이 배포의 특성이 아니라 플랫폼 공통으로 유효한
 //   형태이고, 기본값 '' 를 유지하는 것이 임시방편이 아니다.
 //
+//   2026-09-03, 운영 서버에서 고객 Orchestrator 로 직접 확인:
+//     POST /innotek/DefaultTenant/odata/Jobs/...StopJobs  → 200
+//   인증된 실제 요청이 {service} 없는 경로로 수락된다. 추론이 아니라 실측이다.
+//
 //   기본값을 '' 로 두는 이유: 운영 중인 시스템의 URL 5개를 한꺼번에 바꾸지 않기
 //   위해서다. 정규 형태로 가려면 .env 에 한 줄만 넣으면 된다.
 //     UiPathOrchestratorPath="orchestrator_"

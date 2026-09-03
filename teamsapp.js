@@ -53,8 +53,10 @@ const appMessage5 = process.env.AppMessage5 || '';
 //   입력하는 상황은 대개 이전 Job이 응답을 기다리며 살아 있는 상황이므로,
 //   정작 재시작이 필요한 순간에 거부되는 문제가 있었다.
 //   false로 두면 종전 동작으로 되돌아간다.
-// 기본값 false: stopJob() 은 실제 Orchestrator 를 상대로 호출된 적이 없다.
-// 스테이징에서 확인한 뒤 .env 에서 true 로 켤 것. README 의 안내와 일치시킨다.
+// 기본값 false. stopJob() 의 요청 형식은 2026-09-03 에 확정됐다 — 운영 서버에서
+// 고객 Orchestrator 로, 그리고 별도 Automation Cloud 테넌트로 각각 200 을 받았다.
+// 다만 둘 다 존재하지 않는 Job ID 로 받은 200 이라 라우트와 body 만 증명된다.
+// 살아 있는 Job 에 Kill 이 실제로 먹는지는 배포 후 실제 Job 하나로 확인한 뒤 켤 것.
 const restartOnTrigger = String(process.env.RestartOnTrigger ?? 'false').toLowerCase() === 'true';
 
 // [D-15] Job 중지 방식. Kill = 즉시, SoftStop = 프로세스의 정지 지점까지 대기.
