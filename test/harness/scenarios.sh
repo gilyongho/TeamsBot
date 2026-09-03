@@ -38,18 +38,46 @@ say() {
          \"text\":\"$text\",\"locale\":\"ko-KR\"}"
 }
 
-# 봇이 사용자에게 보낸 메시지 목록
-msgs() { state() { :; }; curl -s $MOCK/__state | python3 -c "
+# mock 이 죽어 있으면 curl 이 빈 문자열을 돌려주고 python 이 트레이스백을 쏟는다.
+# 아래 세 헬퍼는 그 경우 조용히 빈 값 / -1 을 돌려주고, 판정은 사전 검사에서 막는다.
+msgs() { curl -s --max-time 5 "$MOCK/__state" | python3 -c "
 import json,sys
-print('\n'.join(m['text'] or '' for m in json.load(sys.stdin)['seen']['botMessages']))"; }
-count() { curl -s $MOCK/__state | python3 -c "
-import json,sys; print(json.load(sys.stdin)['counts']['$1'])"; }
-stopbody() { curl -s $MOCK/__state | python3 -c "
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+print('\n'.join(m['text'] or '' for m in d['seen']['botMessages']))" 2>/dev/null; }
+
+count() { curl -s --max-time 5 "$MOCK/__state" | python3 -c "
 import json,sys
-s=json.load(sys.stdin)['seen']['stopJob']
-print(json.dumps(s[-1]['body'], ensure_ascii=False) if s else '{}')"; }
+try: print(json.load(sys.stdin)['counts']['$1'])
+except Exception: print(-1)" 2>/dev/null; }
+
+stopbody() { curl -s --max-time 5 "$MOCK/__state" | python3 -c "
+import json,sys
+try: s=json.load(sys.stdin)['seen']['stopJob']
+except Exception: print('{}'); sys.exit(0)
+print(json.dumps(s[-1]['body'], ensure_ascii=False) if s else '{}')" 2>/dev/null; }
 
 printf '\033[1m═══ TeamsBot 로컬 검증 시나리오 ═══\033[0m\n'
+
+# ── 사전 확인 ────────────────────────────────────────────────
+# 둘 중 하나라도 떠 있지 않으면 모든 시나리오가 무의미하게 실패한다.
+# 그걸 "테스트 실패"로 보고하면 코드 결함으로 오인된다. 판정 전에 멈춘다.
+down=0
+if [ "$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "$MOCK/__state")" != "200" ]; then
+    printf '\n\033[31m❌ mock 이 응답하지 않습니다\033[0m  (%s)\n' "$MOCK"
+    printf '     \033[2mnode test/harness/mock-upstream.js > /tmp/mock.log 2>&1 &\033[0m\n'
+    down=1
+fi
+if ! curl -k -s --max-time 3 -o /dev/null "$APP/api/messages" 2>/dev/null; then
+    printf '\n\033[31m❌ 앱이 응답하지 않습니다\033[0m  (%s)\n' "$APP"
+    printf '     \033[2mcp test/harness/env.harness .env  그리고 인증서가 있어야 기동합니다.\033[0m\n'
+    printf '     \033[2m기동 실패 원인은 /tmp/app.log 에 있습니다.\033[0m\n'
+    down=1
+fi
+if [ "$down" = "1" ]; then
+    printf '\n\033[1;31m기동되지 않은 상태입니다. 시나리오를 실행하지 않았습니다.\033[0m\n\n'
+    exit 2
+fi
 
 # ── H-1 : 진행 중 세션이 없을 때의 일반 메시지 ──────────────
 hdr 'H-1  세션 없음 + 일반 메시지 → 시작 방법 안내 (침묵 아님)'
@@ -103,7 +131,10 @@ ctl '{"webhook":"ok"}'
 hdr 'H-6  재시작 — StopJobs 요청 형식  ※ RestartOnTrigger=true 필요'
 clear_state; ctl '{"stopTransition":"immediate"}'
 say "다시 시작"; sleep 6
-if [ "$(count stopJob)" != "0" ]; then
+# count 가 -1(조회 실패)이거나 0 이면 호출되지 않은 것이다.
+# 예전에는 != "0" 으로만 봐서, 조회에 실패한 빈 문자열이 "호출됨"으로 통과했다.
+ns=$(count stopJob)
+if [ "${ns:-0}" -gt 0 ] 2>/dev/null; then
   b=$(stopbody)
   echo "$b" | grep -q '"jobIds"' && ok "body 에 jobIds 배열" || no "jobIds 없음" "$b"
   echo "$b" | grep -q '"strategy"' && ok "body 에 strategy" || no "strategy 없음" "$b"
