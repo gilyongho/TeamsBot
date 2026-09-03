@@ -200,3 +200,40 @@ curl -i -X POST \
 
 이 확인 전까지는 `RestartOnTrigger=false` 로 두십시오. 재시작 기능만 꺼지고
 나머지 수정은 모두 동작합니다.
+
+## 계층 2 — 진짜 Orchestrator 검증 (고객 불필요)
+
+위 하네스는 mock 이 요청을 받아준다는 것만 증명한다. 진짜 Orchestrator 가 같은
+요청을 받아들이는지는 **본인 Automation Cloud 테넌트**로 확인할 수 있다.
+고객 환경도, 운영 서버도 건드리지 않는다.
+
+| 계층 | Orchestrator | Webhook / Teams | 검증 대상 |
+|---|---|---|---|
+| 1 | mock | mock | 큐·순서·중복·타임아웃 |
+| 2 | **진짜 (본인 테넌트)** | mock | 토큰·스코프·경로·폴더 헤더·StartJobs·StopJobs |
+| 3 | 고객 Automation Suite | — | 배포 창에서 `curl` 한 번 |
+
+```bash
+cp test/harness/env.cloud.example test/harness/env.cloud
+# UiPathAppId / UiPathAppSecret 두 줄만 채운다 (.gitignore 에 걸려 있다)
+
+bash test/harness/cloud-check.sh                # 읽기 전용
+bash test/harness/cloud-check.sh --start-stop   # Job 기동 → Kill 까지
+```
+
+확인 항목:
+
+1. 토큰 발급 — External Application 스코프가 맞는가
+2. `{org}/{tenant}/odata` 와 `{org}/{tenant}/orchestrator_/odata` 중 무엇이 유효한가
+   — 운영은 앞 형태로 동작한다. 그것이 관례인지 그 환경 특성인지 여기서 갈린다
+3. 폴더 헤더 `X-UIPATH-OrganizationUnitId`
+4. `StartJobs` 의 `ReleaseName` 전략과 폴더 안의 실제 Release 이름
+5. **`StopJobs` 의 라우트·body·`strategy` 표기** ← 마지막 미검증 경로
+6. `--start-stop` 을 주면 Job 을 실제로 띄우고 Kill 해 `Stopped` 전이까지 확인
+
+토큰과 시크릿은 출력하지 않는다. 6번은 존재하지 않는 Job ID 로 먼저 던져서,
+`404`(경로 문제)와 `400`(body/strategy 문제)을 실제 중지 없이 구분한다.
+
+**Automation Cloud 에서 통과해도 고객 Automation Suite 는 버전이 다를 수 있다.**
+"모른다"가 "거의 확실하다"로 바뀌는 것이지 확정은 아니다. 배포 창에서 같은 확인을
+한 번 더 하는 것을 권한다.

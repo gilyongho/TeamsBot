@@ -146,3 +146,6 @@ key.pem
 # 대체 패키지 매니저 / 도구 캐시 (동료 리뷰에서 추가)
 .pnpm-store/
 .tools/
+
+# 실제 자격증명이 들어가는 파일 (커밋 금지)
+test/harness/env.cloud
