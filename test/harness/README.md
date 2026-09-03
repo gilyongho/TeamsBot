@@ -23,7 +23,7 @@ Bot Framework Connector)를 mock 으로 대체합니다. Teams 활동은 `/api/m
 | 타임아웃·워치독·큐 기아 | 실제 사용자의 대화 흐름 |
 | 헬스체크·인증·기동 실패 처리 | |
 
-**실제 Orchestrator 검증은 별도로 필요합니다** — 아래 "남은 한 가지" 참조.
+**실제 Orchestrator 검증은 별도로 했습니다** — 아래 "실제 Orchestrator 검증" 절 참조.
 
 ## 위험과 방지
 
@@ -175,37 +175,50 @@ pkill -f mock-upstream
 rm -f .env cert.pem key.pem
 ```
 
-## 남은 한 가지 — 실제 Orchestrator 검증
+## 실제 Orchestrator 검증 — 완료 (2026-09-03)
 
-하네스는 mock 이 요청을 받아준다는 것만 증명합니다. **실제 Orchestrator 가 이 요청을
-받아들이는지는 확인되지 않았습니다.** Teams 도 고객도 필요 없는 5분짜리 확인입니다.
+하네스는 mock 이 요청을 받아준다는 것까지만 증명합니다. 진짜 Orchestrator 가 같은 요청을
+받아들이는지는 **아래 확인으로 닫혔습니다.**
+
+| 대상 | 결과 |
+|---|---|
+| 별도 Automation Cloud 테넌트 (`cloud-check.sh`) | `StopJobs` → **200** |
+| 고객 Automation Suite (운영 서버에서 직접) | `StopJobs` → **200** |
+
+고객 환경에서 실행한 것은 다음과 같습니다. **존재하지 않는 Job ID** 를 쓰므로 아무것도
+중지되지 않고, 라우트와 body 형식만 확인됩니다.
 
 ```bash
-# 1) 운영에서 쓰는 것과 같은 방식으로 토큰 발급
+cd /home/teamsuser/workspace/TeamsBot
+
+# .env 값을 셸 해석 없이 읽는다 (Secret 의 $ 때문에 source 하면 값이 망가진다)
+val() { sed -n "s/^$1=//p" .env | head -1 | sed 's/^"//; s/"$//'; }
+
 TOKEN=$(curl -s -X POST "https://as.lgcnsrpa.com/identity_/connect/token" \
   -d grant_type=client_credentials \
-  -d client_id="$UiPathAppId" -d client_secret="$UiPathAppSecret" \
-  -d scope="OR.Jobs" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+  -d client_id="$(val UiPathAppId)" \
+  --data-urlencode client_secret="$(val UiPathAppSecret)" \
+  --data-urlencode scope="OR.Jobs OR.Execution" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))')
 
-# 2) Orchestrator UI 에서 프로세스를 직접 하나 실행하고 Job ID 를 확인
-JOB=<그 Job ID>
-
-# 3) 서버가 보낼 것과 똑같은 요청을 보낸다
-curl -i -X POST \
+curl -s -o /dev/null -w 'StopJobs → HTTP %{http_code}\n' -X POST \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "X-UIPATH-OrganizationUnitId: $UiPathFolderId" \
-  -d "{\"jobIds\":[$JOB],\"strategy\":\"Kill\"}" \
+  -H 'Content-Type: application/json' \
+  -H "X-UIPATH-OrganizationUnitId: $(val UiPathFolderId)" \
+  -d '{"jobIds":[999999999],"strategy":"Kill"}' \
   "https://as.lgcnsrpa.com/innotek/DefaultTenant/odata/Jobs/UiPath.Server.Configuration.OData.StopJobs"
 ```
 
-- **200/204** → 형식 확정. `RestartOnTrigger=true` 로 켜도 됩니다.
-- **400** → `strategy` 표기 문제. `"2"` 로 바꿔 재시도하십시오(`JobStopStrategy="2"`).
-- **404** → 경로 문제. `orchestrator_` 를 넣어 재시도하십시오
-  (`UiPathOrchestratorPath="orchestrator_"`).
+- **200 / 204** → 라우트·body·`strategy:"Kill"` 확정 (← 실제 결과)
+- **400** → `strategy` 표기 문제. `.env` 에 `JobStopStrategy="2"`
+- **404** → 경로 문제. `.env` 에 `UiPathOrchestratorPath="orchestrator_"`
+- **401** → 스코프 부족. 운영 앱에 부여된 스코프로 맞출 것
 
-이 확인 전까지는 `RestartOnTrigger=false` 로 두십시오. 재시작 기능만 꺼지고
-나머지 수정은 모두 동작합니다.
+**아직 남은 것 하나.** 위 200 은 전부 존재하지 않는 Job ID 로 받은 것이라, 라우트와 body 는
+확정이지만 **살아 있는 Job 에 Kill 이 실제로 먹는지는 확인되지 않았습니다.** 그 확인은 고객
+폴더에 실제 Job 이 생겼다 죽는 것이므로 고객에게 알리고 해야 하고, 배포가 안정된 뒤가
+적절합니다. 그때까지는 `RestartOnTrigger=false` 로 두십시오 — 재시작 기능만 꺼지고
+나머지 수정은 전부 동작합니다.
 
 ## 계층 2 — 진짜 Orchestrator 검증 (고객 불필요)
 
@@ -217,7 +230,7 @@ curl -i -X POST \
 |---|---|---|---|
 | 1 | mock | mock | 큐·순서·중복·타임아웃 |
 | 2 | **진짜 (본인 테넌트)** | mock | 토큰·스코프·경로·폴더 헤더·StartJobs·StopJobs |
-| 3 | 고객 Automation Suite | — | 배포 창에서 `curl` 한 번 |
+| 3 | 고객 Automation Suite | — | 운영 서버에서 `curl` 한 번 — **완료, 200** |
 
 ```bash
 cp test/harness/env.cloud.example test/harness/env.cloud
@@ -240,9 +253,8 @@ bash test/harness/cloud-check.sh --start-stop   # Job 기동 → Kill 까지
 토큰과 시크릿은 출력하지 않는다. 6번은 존재하지 않는 Job ID 로 먼저 던져서,
 `404`(경로 문제)와 `400`(body/strategy 문제)을 실제 중지 없이 구분한다.
 
-**Automation Cloud 에서 통과해도 고객 Automation Suite 는 버전이 다를 수 있다.**
-"모른다"가 "거의 확실하다"로 바뀌는 것이지 확정은 아니다. 배포 창에서 같은 확인을
-한 번 더 하는 것을 권한다.
+Automation Cloud 와 고객 Automation Suite 는 버전이 다를 수 있으므로 양쪽에서 각각
+확인했고, 둘 다 200 이었다. 위 "실제 Orchestrator 검증" 절 참조.
 
 ## 어디서 돌릴 수 있나 — 우분투가 꼭 필요하지는 않다
 
