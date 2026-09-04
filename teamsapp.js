@@ -83,6 +83,12 @@ const appMessage8 = process.env.AppMessage8
 const appMessage9 = process.env.AppMessage9
     || `이전 작업을 정리하는 중입니다.<br>잠시 후 <b>'${processTriggerKeywords[0] || '에이전트 시작'}'</b>이라고 다시 입력해주세요.`;
 
+// 이전 Job 의 상태를 끝내 확인하지 못해 기동을 거절할 때의 안내.
+//   여기서 새 Job 을 기동하면 같은 대화에 에이전트가 둘 붙는다. 그것은 바로 이번
+//   장애(중복 응답)와 같은 종류의 고장이므로, 사용자를 잠시 기다리게 하는 편이 낫다.
+const appMessage10 = process.env.AppMessage10
+    || '지금은 이전 작업의 상태를 확인할 수 없어 새로 시작할 수 없습니다.<br>잠시 후 다시 시도해주세요.';
+
 // [D-15] 재시작 안내 메시지
 const appMessage6 = process.env.AppMessage6
     || '진행 중이던 작업을 종료하고 처음부터 다시 시작합니다.<br>잠시만 기다려주세요.';
@@ -450,8 +456,12 @@ class TeamsApp extends TeamsActivityHandler {
                 await context.sendActivity({ type: ActivityTypes.Typing });
             });
             console.log(`[${new Date().toLocaleString()}] 사용자 '${userId}'에게 typing indicator 전송 완료.`);
+            return true;
         } catch (error) {
             console.error(`[${new Date().toLocaleString()}] 사용자 '${userId}'에게 typing indicator 전송 중 오류 발생: ${error}`);
+            // createConversationAndSendMessage 와 같은 규약. 삼키면 호출부가 200 을
+            // 돌려주고, Maestro 는 보내지 못한 것을 보냈다고 믿는다.
+            return false;
         }
     }
 }
@@ -641,6 +651,18 @@ async function tryProcessRun() {
 
         const state = await UIPATH.getJobState(app.uipathToken.token, jobId);
 
+        // ── Orchestrator 가 404 로 답한 경우 ──────────────────
+        // 추측이 아니라 확정이다. 그 Job 은 존재하지 않으므로(보존 기간 경과·삭제 등)
+        // 등록을 지우고 새로 기동해도 중복 실행이 아니다. 아래 미확인 경로와 달리
+        // 사용자를 기다리게 할 이유가 없다.
+        if (state === UIPATH.JOB_NOT_FOUND) {
+            console.log(
+                `[${new Date().toLocaleString()}] Job ${jobId} 이(가) 존재하지 않아 등록을 정리하고 새로 기동합니다.`);
+            JOBTABLE.table.deleteJob(item.id);
+            await startJobOrNotify(item);
+            return;
+        }
+
         // ── [D-8] 상태 조회 실패 ──────────────────────────────
         // 이전 Job이 실제로 살아 있는지 모르는 채로 새 Job을 기동하면
         // 같은 대화에 두 에이전트가 붙는다. 기동을 보류하고 재시도한다.
@@ -655,12 +677,16 @@ async function tryProcessRun() {
                 return;
             }
 
-            // 임계치 초과 — 영구 정지를 막기 위해 기동을 허용한다.
+            // 임계치 초과 — 여전히 이전 Job 이 살아 있는지 모른다.
+            //   예전에는 여기서 "중복 실행 위험을 감수하고" 기동했는데, 그것은 열 줄 위의
+            //   D-8 원칙과 정반대이고 이번 장애와 같은 종류의 고장(한 대화에 둘)을 만든다.
+            //   기동하지 않고 사용자에게 알린 뒤 항목을 버린다.
+            //   jobtable 등록은 남긴다. Orchestrator 가 회복되면 상태를 얻거나 404 를
+            //   받아 위 분기로 정리되므로, 남겨 두는 편이 스스로 풀린다.
             console.error(
                 `[${new Date().toLocaleString()}] ⚠️ Job ${jobId} 상태를 ${maxStateCheckRetry}회 ` +
-                `확인하지 못했습니다. 중복 실행 위험을 감수하고 새 Job을 기동합니다.`);
-            JOBTABLE.table.deleteJob(item.id);
-            await startJobOrNotify(item);
+                `확인하지 못했습니다. 중복 실행을 피해 기동하지 않고 사용자에게 안내합니다.`);
+            await app.createConversationAndSendMessage(item.id, appMessage10);
             return;
         }
 
@@ -874,7 +900,11 @@ teamsAppServer.post('/api/sendTypingIndicator', apiKeyAuth, async (req, res) => 
     }
 
     try {
-        await app.createConversationAndSendTypingIndicator(userId);
+        const sent = await app.createConversationAndSendTypingIndicator(userId);
+        if (!sent) {
+            res.send(502, `사용자 ${userId}에게 typing indicator를 전송하지 못했습니다.`);
+            return;
+        }
         res.send(`사용자 ${userId}에게 typing indicator를 보냈습니다.`);
     } catch (err) {
         console.error(`[${new Date().toLocaleString()}] 엔드포인트 에러:`, err);

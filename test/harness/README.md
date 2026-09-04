@@ -256,6 +256,38 @@ bash test/harness/cloud-check.sh --start-stop   # Job 기동 → Kill 까지
 Automation Cloud 와 고객 Automation Suite 는 버전이 다를 수 있으므로 양쪽에서 각각
 확인했고, 둘 다 200 이었다. 위 "실제 Orchestrator 검증" 절 참조.
 
+## restify 11 → 12 — 측정 결과 (2026-09-04)
+
+`restify@11` 은 운영 의존성 고위험 2건(`find-my-way` 라우팅 ReDoS · HTTP/2 DDoS)을 안고
+있고, 수정은 `restify@12` 에만 있습니다. 메이저 업그레이드라 미루고 있었는데, 하네스로
+실제로 재어 봤습니다.
+
+| | restify 11 | restify 12 |
+|---|---|---|
+| `npm audit --omit=dev` | 10건 (**high 2**) | 7건 (**high 0**) |
+| 하네스 H-1~H-6 | 11/11 | **11/11** |
+| `npm run check` | 통과 | **통과** |
+| `process.binding('http_parser')` | 사용 (DEP0111) | **사용 안 함** |
+| 엔드포인트 (403/200/400/502 · apiKeyAuth · bodyParser) | 정상 | **동일** |
+
+**이 앱에서 고위험 2건의 실제 도달 가능성은 낮습니다.** 라우트가 전부 정적이라
+(`/`, `/api/messages`, `/api/sendMessage`, `/api/sendTypingIndicator`, `/reset`, `/dequeue`)
+다중 파라미터 라우트 ReDoS 경로가 없고, `createServer` 에 `http2` 옵션을 주지 않으므로
+HTTP/2 DDoS 경로도 없습니다. 즉 **배포를 막을 사유는 아닙니다.**
+
+그래도 올려야 하는 이유는 두 가지입니다 — 취약점 보고서를 매번 설명하지 않아도 되고,
+`http_parser` 를 쓰지 않게 되어 **Node 24 로 갈 길이 열립니다**(restify 11 은 여기서 막힙니다).
+
+**권장**: 이번 결함 수정과 **분리해서** 별도 변경으로 올리십시오. 고객이 기다리는 것은
+중복 발송 수정이고, 거기에 HTTP 프레임워크 메이저 교체를 얹으면 문제 발생 시 원인을
+가르기 어려워집니다. 준비는 돼 있습니다.
+
+```bash
+npm install restify@12
+npm run check
+bash test/harness/scenarios.sh      # 11/11 확인
+```
+
 ## 어디서 돌릴 수 있나 — 우분투가 꼭 필요하지는 않다
 
 하네스가 요구하는 것은 **Node · curl · python3 · openssl** 뿐이다. 운영 서버의

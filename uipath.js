@@ -293,6 +293,13 @@ async function getAvailableRuntimes(token) {
 
 // job의 상태를 반환한다.
 // Pending, Running, Stopping, Terminating, Faulted, Successful, Stopped, Suspended, Resumed
+// getJobState 가 "그런 Job 이 없다" 를 "물어보지 못했다" 와 구분해 돌려주는 값.
+//   404 는 Orchestrator 의 확정적 답변이다. 그 Job 은 존재하지 않으므로 새 Job 을
+//   기동해도 중복 실행이 아니다. 반면 5xx·타임아웃·인증 실패는 아무것도 알려주지
+//   않으므로 null 로 남긴다. 이 둘을 뭉뚱그리면 호출부가 도박을 하게 된다.
+//   실제 Job 상태값과 겹치지 않는 문자열이어야 한다.
+const JOB_NOT_FOUND = '__JobNotFound__';
+
 async function getJobState(token, jobId) {
 
     if (!token) {
@@ -317,6 +324,12 @@ async function getJobState(token, jobId) {
         return state;
 
     } catch (error) {
+        // 404 = "그런 Job 없음". 실패가 아니라 확정된 답이다.
+        if (error.response && error.response.status === 404) {
+            console.log(`[${new Date().toLocaleString()}] Job ${jobId} 은(는) 존재하지 않습니다 (404).`);
+            return JOB_NOT_FOUND;
+        }
+
         console.error(`❌ Job ${jobId} 상태 확인 실패:`);
         if (error.response) {
             console.error(`   - Status: ${error.response.status}`);
@@ -384,6 +397,7 @@ async function stopJob(token, jobId, strategy = 'Kill') {
 }
 
 module.exports = {
+    JOB_NOT_FOUND,
     getAccessToken,
     runProcess,
     getAvailableRuntimes,

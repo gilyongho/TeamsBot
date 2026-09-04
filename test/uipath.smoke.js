@@ -29,8 +29,10 @@ const axiosMock = {
             ? Promise.reject({ response: { status: 404, data: { message: 'not found' } } })
             : Promise.resolve({ status: 200 });
     },
-    get: () => Promise.resolve({ data: {} })
+    get: () => getBehaviour()
 };
+// getJobState 검증용. 기본은 Running.
+let getBehaviour = () => Promise.resolve({ data: { State: 'Running' } });
 
 const realLoad = Module._load;
 Module._load = function (request) {
@@ -103,6 +105,29 @@ const check = (name, cond, detail = '') => {
         check(`axios 호출 ${calls}건 전부에 timeout (${timeouts}건)`, calls === timeouts,
             `호출 ${calls} / timeout ${timeouts}`);
     }
+
+    // getJobState 가 "그런 Job 없음(404)" 과 "물어보지 못함(5xx·타임아웃)" 을 구분해야 한다.
+    //   이 둘을 뭉뚱그리면 호출부가 이전 Job 의 생사를 모르는 채 새 Job 을 띄우게 되고,
+    //   한 대화에 에이전트가 둘 붙는다 — 이번 장애와 같은 종류의 고장이다.
+    console.log('\n[7] getJobState — 404 와 조회 실패를 구분');
+
+    getBehaviour = () => Promise.resolve({ data: { State: 'Running' } });
+    check('정상 응답은 상태 문자열', await UIPATH.getJobState('tok', 1) === 'Running');
+
+    getBehaviour = () => Promise.reject({ response: { status: 404, data: {} } });
+    check('404 는 JOB_NOT_FOUND (null 아님)',
+        await UIPATH.getJobState('tok', 1) === UIPATH.JOB_NOT_FOUND);
+
+    getBehaviour = () => Promise.reject({ response: { status: 500, data: {} } });
+    check('5xx 는 null (알 수 없음)', await UIPATH.getJobState('tok', 1) === null);
+
+    getBehaviour = () => Promise.reject({ request: {}, message: 'timeout' });
+    check('타임아웃은 null (알 수 없음)', await UIPATH.getJobState('tok', 1) === null);
+
+    check('JOB_NOT_FOUND 가 실제 Job 상태값과 겹치지 않음',
+        !['Pending', 'Running', 'Stopping', 'Terminating', 'Suspended', 'Resumed',
+          'Successful', 'Faulted', 'Stopped'].includes(UIPATH.JOB_NOT_FOUND),
+        UIPATH.JOB_NOT_FOUND);
 
     console.log(`\n결과: ${pass} 통과 / ${fail} 실패\n`);
     process.exit(fail ? 1 : 0);

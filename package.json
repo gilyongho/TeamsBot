@@ -12,7 +12,7 @@
   "license": "ISC",
   "description": "Teams App that relays chat messages between Microsoft Teams and UiPath Maestro",
   "engines": {
-    "node": ">=22.11.0 <23 || >=24.0.0 <25"
+    "node": ">=22.11.0 <23"
   },
   "dependencies": {
     "@azure/identity": "^4.13.0",
