@@ -20,9 +20,10 @@ const http = require('http');
 const PORT = Number(process.env.MockPort || 19000);
 
 // ── 동작 모드 ────────────────────────────────────────────────
-//   ok   : 정상 응답
-//   fail : 500 반환
-//   hang : 응답하지 않음 (타임아웃 검증용)
+//   ok       : 정상 응답
+//   fail     : 500 반환
+//   hang     : 응답하지 않음 (타임아웃 검증용)
+//   notfound : 404 반환 (jobState 전용 — "그런 Job 없음"과 "물어보지 못함"의 구분 검증)
 const mode = {
     webhook: 'ok',
     token: 'ok',
@@ -136,6 +137,8 @@ const server = http.createServer(async (req, res) => {
         seen.jobState.push({ at: Date.now(), id });
         if (mode.jobState === 'hang') { log(`Jobs(${id}) → 응답 보류(hang)`); return; }
         if (mode.jobState === 'fail') { log(`Jobs(${id}) → 500`); return json(res, 500, { error: 'mock' }); }
+        // 404 는 "그런 Job 없다"는 확정된 답이다. 500 과 달리 새 Job 기동이 안전하다.
+        if (mode.jobState === 'notfound') { log(`Jobs(${id}) → 404`); return json(res, 404, { message: 'not found' }); }
         const state = jobs.get(id) || 'Running';
         log(`Jobs(${id}) → ${state}`);
         return json(res, 200, { Id: id, State: state });
