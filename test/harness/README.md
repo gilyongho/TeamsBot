@@ -73,7 +73,14 @@ cp test/harness/env.harness .env
 ```
 
 `env.harness` 는 포트를 **3979 / 8081** 로, 상류를 **127.0.0.1:19000** 으로 지정합니다.
-운영(3978 / 8080)과 겹치지 않습니다.
+
+**운영 포트를 코드 기본값(3978/8080)으로 가정하지 마십시오.** `.env` 로 정해지며 서버마다
+다릅니다 — innotek 운영기는 **8000/8001** 이었습니다. `preflight.sh` 가 운영 `.env` 에서
+직접 읽어 확인합니다.
+
+```bash
+grep -E '^(MicrosoftAppPort|MessageQueuePort)' /home/teamsuser/workspace/TeamsBot/.env
+```
 
 ## 실행
 

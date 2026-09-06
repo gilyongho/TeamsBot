@@ -72,9 +72,20 @@ for p in 3979 8081 19000; do
     if inuse "$p"; then bad "포트 $p 사용 중" "하네스가 기동하지 못합니다."
     else ok "포트 $p 비어 있음"; fi
 done
-for p in 3978 8080; do
-    inuse "$p" && ok "운영 포트 $p 는 그대로 사용 중" || warn "운영 포트 $p 가 열려 있지 않습니다"
-done
+# 운영 포트는 서버마다 다르다. 코드 기본값(3978/8080)을 가정하면 안 된다 —
+# innotek 은 8000/8001 이었다. 운영 .env 에서 읽고, 못 읽으면 검사를 건너뛴다.
+PROD_ENV="$PROD_DIR/.env"
+envport() { sed -n "s/^$1=//p" "$PROD_ENV" 2>/dev/null | head -1 | tr -d '"'"'"' '; }
+PROD_APP_PORT=${PROD_APP_PORT:-$(envport MicrosoftAppPort)}
+PROD_MQ_PORT=${PROD_MQ_PORT:-$(envport MessageQueuePort)}
+if [ -n "$PROD_APP_PORT" ] || [ -n "$PROD_MQ_PORT" ]; then
+    for p in $PROD_APP_PORT $PROD_MQ_PORT; do
+        inuse "$p" && ok "운영 포트 $p 는 그대로 사용 중" || warn "운영 포트 $p 가 열려 있지 않습니다"
+    done
+else
+    warn "운영 .env 를 읽을 수 없어 운영 포트 확인을 건너뜁니다 ($PROD_ENV)"
+    warn "  하네스 포트(3979/8081)와 겹치는지는 직접 확인하십시오"
+fi
 
 # ── 5. 하네스 설정이 진짜 상류를 가리키지 않는가 ──────────────
 printf '\n\033[1m하네스 설정\033[0m\n'
