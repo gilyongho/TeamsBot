@@ -38,9 +38,11 @@ npm run check    # both
 placed after a `throw`. Both classes of defect shipped to production in this
 repository before these checks existed — run it before every push.
 
-`npm test` runs two suites: `test/uipath.smoke.js` (pins the `stopJob` request
-shape against the Orchestrator API docs) and `test/msgqueue.smoke.js`.
-The latter needs `cert.pem`/`key.pem` present, since `msgqueue.js` opens an
+`npm test` runs three suites: `test/uipath.smoke.js` (pins the `stopJob` request
+shape against the Orchestrator API docs), `test/msgqueue.smoke.js`, and
+`test/outboundcontext.smoke.js` (pins the session-guard exemption for conversations
+opened through `/api/sendMessage` — see below).
+`test/msgqueue.smoke.js` needs `cert.pem`/`key.pem` present, since `msgqueue.js` opens an
 HTTPS server at module load. A throwaway pair is fine:
 
 ```bash
@@ -89,6 +91,52 @@ The second webhook, added earlier because a customer reported missing replies, w
 unconditionally on the assumption that the receiver would ignore the duplicate. It did not —
 that assumption is what produced the incident this branch fixes.
 
+## Conversations started by an external system
+
+`/api/sendMessage` lets an outside system open a conversation with a user and then read the
+user's reply off the webhook. A robot that has to complete an interactive second factor uses
+exactly this shape: it posts the prompt, the user answers in Teams, and the answer arrives at
+the robot as a webhook event.
+
+The session guard has to allow for that. When a plain message arrives, the server used to ask
+one question — *does this user have a job in `JobTable`?* — and, if not, replied with
+`AppMessage8` instead of forwarding. `JobTable` is only ever written when **this server**
+starts an Orchestrator job, so a conversation opened through `/api/sendMessage` was never in
+it. The user's reply was answered with "no conversation in progress" and the waiting system
+heard nothing, forever.
+
+So the guard now asks a second question — *did we message this user recently?* —
+and `outboundcontext.js` holds the answer.
+
+```
+POST /api/sendMessage   → 200 → mark(userId)
+user replies            → hasJob(userId) || hasOutboundContext(userId) → forward to webhook
+                        → neither                                      → AppMessage8
+```
+
+**This is deliberately not a configuration switch.** The table only ever contains users that
+`/api/sendMessage` actually reached, so a deployment that does not call the endpoint keeps an
+empty table and behaves exactly as before. One source tree serves both kinds of customer with
+no per-site flag to track, and a customer that adopts the pattern later needs no config change.
+`OutboundContextTtlMs` tunes the window; it does not turn the behaviour on or off.
+
+Three things to know about the window:
+
+- The table is in-memory, so a restart clears it — the same property `JobTable` has. A reply
+  that arrives after a restart is answered with `AppMessage8` and the waiting system keeps
+  waiting. Let interactive flows finish before restarting, or expect to re-run them.
+- After the TTL expires the reply is answered with `AppMessage8` again. The default is ten
+  minutes; a flow where the user has to fetch a code from elsewhere may need longer.
+- While the window is open, *any* message from that user is forwarded, not just the awaited
+  reply. That is the pre-guard behaviour, bounded by the TTL. A shorter TTL narrows it at the
+  cost of cutting off slow users.
+
+A failed send (502) does **not** mark the user. Nothing was delivered, so there is no reply to
+wait for, and marking would leak unrelated messages onto the webhook.
+
+Pinned by `test/outboundcontext.smoke.js` and harness scenarios H-9 / H-10 / H-11. H-11 is the
+regression guard for deployments that do not use the endpoint.
+
 ## Orchestrator URL path
 
 The canonical path is `{domain}/{org}/{tenant}/{service}/odata/...`, where `{service}` is
@@ -132,6 +180,7 @@ and starts over. Keep them to explicit start phrases.
 |---|---|---|
 | Service restarts while a job is live | The Orchestrator job keeps running but `JobTable` is in-memory and empty after restart. The user's next answer still reaches the orphan job through the webhook; a new trigger starts a **second** job into the same conversation, because the guard has nothing to check against. | `jobtable.js` holds state only in memory and `SIGTERM` does not drain. Before restarting, let live conversations finish, or reconcile against Orchestrator afterwards. |
 | A job dies without the server knowing | Answers are POSTed, the receiver returns 200, and the user gets silence. The server cannot tell a live job from a dead one — the webhook receiver acknowledges either way. | Nothing links `JobTable` to real Orchestrator state except the check made when a new trigger arrives. |
+| Service restarts while an external system waits for a reply | The user's reply is answered with `AppMessage8` and the waiting system never receives it. | `outboundcontext.js` is in-memory, like `jobtable.js`. Let interactive flows finish before restarting, or re-run them afterwards. |
 | Trigger typed while a job runs, `RestartOnTrigger=false` | The user is told the previous job is still running, and the message is also forwarded to the agent so it is not lost. There is no user-facing way to end a stuck session. | Ending one requires `stopJob`, which is what `RestartOnTrigger` gates. Verify it in staging and turn it on. |
 
 ## Known remaining items
@@ -141,7 +190,7 @@ and starts over. Keep them to explicit start phrases.
 | Both HTTP ports bind `0.0.0.0` | `bodyParser` runs before `apiKeyAuth`, so an unauthenticated request's body is buffered before the 403. Body size is now capped (64 KB / 256 KB), but the ports should still be firewalled to the Bot Framework and UiPath source ranges. |
 | UiPath OAuth scope | `uipath.js` requests ~60 scopes including `*.Write` on Administration, Users, Machines and Settings; the code only uses StartJobs, `Jobs({id})`, StopJobs and Machines. Narrow it with `UiPathAuthScope` once verified in staging — a leaked credential currently reaches the whole tenant. |
 | `restify` 11 → 12 | Two high-severity advisories (incl. `find-my-way` ReDoS) need this major upgrade. Not applied here: both HTTPS servers and `bodyParser` sit on restify and need a regression pass. |
-| `conversationReference` | A single instance field shared by every user (`teamsapp.js`). Works in a single tenant because `serviceUrl` and the bot identity are constant, but it should be a `Map<userId, ref>`. `sendMessageToCurrentUser()` would deliver to whoever messaged last; it currently has no caller. |
+| `conversationReference` | A single instance field shared by every user (`teamsapp.js`). Works in a single tenant because `serviceUrl` and the bot identity are constant, but it should be a `Map<userId, ref>`. `sendMessageToCurrentUser()` would deliver to whoever messaged last; it currently has no caller. **It also starts as `null` and is only filled from `onMessage`, while `createConversationAndContinue()` dereferences it unguarded — so after a restart, `/api/sendMessage` returns 502 until some user has spoken to the bot.** That is reached before any of the retry or context logic and matters most to an unattended caller. |
 | Trigger typos | Matching is exact-substring after whitespace removal and case folding, so transposition typos (`이에전트` for `에이전트`) still miss. Listing variants does not scale — an Adaptive Card button is the real fix, and needs manifest and Maestro-side changes. |
 | `getAvailableRuntimes()` | No caller since `312ff30`. Its Machines query is tenant-scoped while its Jobs query is folder-scoped, so the figure it returns is overstated. Fix the scope before reusing it. |
 | `stopJob` untested against a live Orchestrator | The request shape now follows the documented bulk action (`POST /odata/Jobs/UiPath.Server.Configuration.OData.StopJobs`, body `{jobIds:[id], strategy:"Kill"}`) and is pinned by `test/uipath.smoke.js`, but it has never been executed against a real tenant. Verify in staging before enabling `RestartOnTrigger`. |

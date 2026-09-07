@@ -106,8 +106,27 @@ H-5  webhook 무응답 → 타임아웃                       ✅
 H-6  재시작 → StopJobs   ※ RestartOnTrigger=true    ✅ ✅ ✅
 H-7  상태 조회 실패 → 기동 안 함 + 안내             ✅ ✅ ✅
 H-8  상태 조회 404 → 정리 후 기동                    ✅
-결과: 15 통과 / 0 실패
+H-9  sendMessage 로 시작 → 답변이 webhook 으로      ✅ ✅ ✅
+H-10 outbound 맥락 TTL 만료 → 다시 M8               ✅ ✅
+H-11 sendMessage 미사용 사용자 → J-7 그대로         ✅ ✅
+결과: 22 통과 / 0 실패
 ```
+
+`RestartOnTrigger=false` 로 두면 H-6 이 건너뛰어져 **19 통과**가 나옵니다. 정상입니다.
+
+**H-9 / H-10 / H-11 은 한 묶음입니다.** `/api/sendMessage` 로 대화를 시작한 외부 시스템
+(예: 2차인증 로봇)의 답변이 시작 안내(M8)에 흡수되지 않아야 하고(H-9), 그 예외는 TTL 로
+닫혀야 하며(H-10), **그 엔드포인트를 쓰지 않는 배포의 동작은 하나도 바뀌지 않아야
+합니다(H-11).** H-11 이 다른 고객에 대한 회귀 방어선입니다 — 이 성질이 깨지면 고객별
+설정 없이 단일 소스로 운영할 수 없게 됩니다.
+
+H-10 은 `env.harness` 의 `OutboundContextTtlMs=3000` 을 전제로 합니다. 운영 기본값
+(600000)으로 돌리면 대기 시간이 10분이라 자동으로 건너뜁니다.
+
+**H-9 / H-10 은 먼저 `say` 로 활동을 한 번 주입합니다.** `createConversationAndContinue()`
+가 `conversationReference` 를 역참조하는데 그 값은 `onMessage` 에서만 채워지므로, 활동이
+한 번도 없으면 `/api/sendMessage` 가 502 를 돌려줍니다. 운영에서도 재기동 직후 같은
+상태가 되므로, 무인 호출자에게는 별도 소견입니다(루트 README 의 Known remaining items).
 
 **H-7 / H-8 은 짝입니다.** 이전 Job 의 상태를 물어보지 못했을 때(5xx·타임아웃) 새 Job 을
 띄우면 한 대화에 에이전트가 둘 붙고, 그것은 이번 장애와 같은 종류의 고장입니다. 반대로

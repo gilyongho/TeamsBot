@@ -47,6 +47,18 @@ say() {
          \"text\":\"$text\",\"locale\":\"ko-KR\"}"
 }
 
+# 외부 시스템이 /api/sendMessage 로 대화를 시작하는 것을 흉내낸다.
+#   sendmsg "본문" [사용자ID]  →  HTTP 상태 코드를 표준출력으로 돌려준다.
+#   TeamsAppApiKey 는 env.harness 의 값과 같아야 한다.
+TA_KEY=${TA_KEY:-harness-ta-key}
+sendmsg() {
+  local text="$1"
+  local uid="${2:-$USER_ID}"
+  curl -k -s -o /dev/null -w '%{http_code}' -X POST $APP/api/sendMessage \
+    -H 'content-type: application/json' -H "x-api-key: $TA_KEY" \
+    -d "{\"userId\":\"$uid\",\"message\":\"$text\"}"
+}
+
 # mock 이 죽어 있으면 curl 이 빈 문자열을 돌려주고 python 이 트레이스백을 쏟는다.
 # 아래 세 헬퍼는 그 경우 조용히 빈 값 / -1 을 돌려주고, 판정은 사전 검사에서 막는다.
 msgs() { curl -s --max-time 5 "$MOCK/__state" | python3 -c "
@@ -187,6 +199,86 @@ n8=$(count startJob)
   && ok "404 면 등록을 정리하고 새로 기동함 (${n8}회)" \
   || no "기동하지 않음 — 오래된 Job ID 로 사용자가 영구 정지됨" "${n8}"
 ctl '{"jobState":"ok"}'
+
+# ══════════════════════════════════════════════════════════════
+#  [J-7 보완] 외부 시스템이 시작한 대화
+#
+#  J-7 은 "진행 중인 세션이 없는 일반 메시지"를 webhook 으로 보내지 않고 시작
+#  안내(M8)로 돌린다. 그 판정이 jobtable 뿐이라, /api/sendMessage 로 대화를
+#  시작한 외부 시스템(예: 2차인증 RPA)의 답변까지 흡수해 버렸다.
+#  아래 세 시나리오가 그 경계를 고정한다.
+# ══════════════════════════════════════════════════════════════
+
+# ── H-9 : sendMessage 로 시작한 대화의 답변은 webhook 으로 가야 한다 ──
+hdr 'H-9  /api/sendMessage 로 시작 → 답변이 webhook 으로  ← J-7 보완의 핵심'
+# 전용 사용자를 쓴다. 앞 시나리오의 jobtable 등록이 남아 있으면 hasJob 만으로
+# 통과해 버려서, 정작 검증하려는 outbound 맥락 판정을 지나친다.
+U9=aad-user-h9-$RUN_ID
+clear_state
+# createConversationAndContinue 가 conversationReference 를 역참조한다.
+#   그 값은 onMessage 에서만 채워지므로, 한 번도 활동이 없으면 sendMessage 가 502 다.
+#   실제 운영에서도 재기동 직후 같은 상태가 되므로, 별도 소견으로 보고한다.
+say "안녕" "$U9" >/dev/null; sleep 2
+clear_state
+code=$(sendmsg "인증 코드를 입력해 주세요" "$U9")
+if [ "$code" != "200" ]; then
+  no "전제 실패 — /api/sendMessage 가 200 이 아님" "HTTP $code"
+else
+  ok "전제: /api/sendMessage 200"
+  sleep 1
+  clear_state
+  say "483920" "$U9"; sleep 3               # 사용자가 인증 코드를 입력한다
+  n9=$(count webhook)
+  [ "$n9" = "1" ] \
+    && ok "답변이 webhook 으로 정확히 1회 전달됨" \
+    || no "webhook 발송 횟수" "${n9}회 — 0 이면 M8 이 답변을 흡수한 것(외부 시스템 영구 대기)"
+  msgs | grep -q "진행 중인 대화가 없습니다" \
+    && no "M8 이 발송됨 — 맥락 판정이 동작하지 않음" \
+    || ok "M8 을 보내지 않음"
+fi
+
+# ── H-10 : TTL 이 지나면 다시 J-7 이 적용된다 ────────────────
+hdr 'H-10 outbound 맥락 TTL 만료 → 다시 시작 안내(M8)  ※ OutboundContextTtlMs 짧게 설정 필요'
+# env.harness 의 OutboundContextTtlMs 가 3000 이하일 때만 의미가 있다.
+# 기본값(600000)으로 돌리면 대기 시간이 10분이라 시나리오가 성립하지 않는다.
+TTL_MS=${OUTBOUND_TTL_MS_FOR_TEST:-3000}
+if [ "$TTL_MS" -gt 5000 ] 2>/dev/null; then
+  printf '    \033[33m—\033[0m OutboundContextTtlMs 가 커서 건너뜀 (env.harness 에서 3000 으로 낮추면 검증됨)\n'
+else
+  U10=aad-user-h10-$RUN_ID
+  clear_state
+  say "안녕" "$U10" >/dev/null; sleep 2
+  code=$(sendmsg "인증 코드를 입력해 주세요" "$U10")
+  if [ "$code" != "200" ]; then
+    no "전제 실패 — /api/sendMessage 가 200 이 아님" "HTTP $code"
+  else
+    sleep $(( TTL_MS / 1000 + 2 ))          # TTL 을 확실히 넘긴다
+    clear_state
+    say "483920" "$U10"; sleep 3
+    n10=$(count webhook)
+    [ "${n10:-0}" = "0" ] \
+      && ok "TTL 경과 후에는 webhook 으로 보내지 않음" \
+      || no "TTL 이 만료되지 않음" "${n10}회 발송됨"
+    msgs | grep -q "진행 중인 대화가 없습니다" \
+      && ok "시작 안내(M8)로 되돌아감 — J-7 이 유지됨" \
+      || no "M8 없음" "$(msgs | tr '\n' '|')"
+  fi
+fi
+
+# ── H-11 : sendMessage 를 쓰지 않는 배포는 기존 동작과 동일해야 한다 ──
+hdr 'H-11 sendMessage 미사용 사용자 → J-7 그대로  ← 다른 고객 회귀 방지'
+# 이 성질이 깨지면 고객별 설정 없이 단일 소스로 운영할 수 없게 된다.
+# H-1 과 같은 판정이지만, outbound 표가 다른 사용자로 채워진 상태에서 확인한다.
+U11=aad-user-h11-$RUN_ID
+clear_state
+say "아무 말" "$U11"; sleep 3
+n11=$(count webhook)
+[ "${n11:-0}" = "0" ] \
+  && ok "webhook 으로 보내지 않음 (다른 사용자의 outbound 맥락에 영향받지 않음)" \
+  || no "webhook 발송됨 — J-7 이 무력화됨" "${n11}회"
+msgs | grep -q "진행 중인 대화가 없습니다" \
+  && ok "시작 안내를 받음" \
+  || no "시작 안내 없음" "$(msgs | tr '\n' '|')"
 
 printf '\n\033[1m결과: %d 통과 / %d 실패\033[0m\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

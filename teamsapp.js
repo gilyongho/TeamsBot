@@ -7,6 +7,7 @@ const UIPATH = require('./uipath');
 const MSGQUEUE = require('./msgqueue');
 const PROCQUEUE = require('./procqueue')
 const JOBTABLE = require('./jobtable')
+const OUTBOUND = require('./outboundcontext')
 
 // 필요한 패키지: npm install botbuilder restify dotenv @microsoft/microsoft-graph-client
 require('dotenv').config();
@@ -111,6 +112,18 @@ function numEnv(name, def, min = 1) {
 
 // [D-8] Job 상태 조회 연속 실패 허용 횟수
 const maxStateCheckRetry = numEnv('MaxStateCheckRetry', 3);
+
+// [J-7 보완] /api/sendMessage 로 봇이 먼저 말을 건 사용자를 얼마나 "맥락 있음" 으로
+//   볼지. 이 시간 안에 온 그 사용자의 일반 메시지는 시작 안내(M8)로 흡수하지 않고
+//   webhook 으로 전달한다. 상세는 outboundcontext.js 주석 참조.
+//   짧게 잡으면 답변이 늦은 사용자가 M8 로 흡수되고, 길게 잡으면 무관한 메시지까지
+//   webhook 으로 나가는 창이 넓어진다.
+const OUTBOUND_CONTEXT_TTL_MS = numEnv('OutboundContextTtlMs', OUTBOUND.DEFAULT_TTL_MS, 1000);
+OUTBOUND.context.configure(OUTBOUND_CONTEXT_TTL_MS);
+
+// 다시 읽히지 않는 항목은 has() 로 정리되지 않으므로 주기적으로 비운다.
+//   unref() 로 이 타이머가 프로세스 생존을 붙잡지 않게 한다.
+setInterval(() => OUTBOUND.context.sweep(), OUTBOUND_CONTEXT_TTL_MS).unref();
 
 // [D-15] 중지 확인이 끝나지 않을 때 포기하기까지의 주기 수
 const maxRestartConfirmRounds = 3;
@@ -258,11 +271,16 @@ class TeamsApp extends TeamsActivityHandler {
                 // 큐를 트리거해준다.
                 tryProcessRun();
 
-            } else if (!JOBTABLE.table.hasJob(userInfo.id)) {
+            } else if (!JOBTABLE.table.hasJob(userInfo.id)
+                       && !OUTBOUND.context.has(userInfo.id)) {
 
                 // 진행 중인 세션이 없다. 이 메시지를 소비할 Job 이 없으므로 webhook 으로
                 // 보내면 200 만 돌아오고 사용자는 아무 응답도 받지 못한다.
                 // 첫 사용자가 인사말에 자연어로 답하는 경우가 정확히 이 경로다.
+                //
+                // [J-7 보완] 단, 봇이 /api/sendMessage 로 먼저 말을 건 사용자는 제외한다.
+                //   그 경우 답변을 기다리는 외부 시스템이 소비자다. jobtable 에는 없지만
+                //   맥락이 있으므로, 여기서 흡수하면 그 시스템이 영원히 대기한다.
                 console.log(
                     `[${new Date().toLocaleString()}] 진행 중인 세션이 없어 시작 방법을 안내합니다. ` +
                     `사용자 '${userInfo.id}'`);
@@ -883,6 +901,12 @@ teamsAppServer.post('/api/sendMessage', apiKeyAuth, async (req, res) => {
             res.send(502, `사용자 ${userId}에게 메시지를 전송하지 못했습니다.`);
             return;
         }
+        // [J-7 보완] 외부 시스템이 이 사용자와 대화를 시작했다. 그 시스템이 답변을
+        //   기다리는 소비자이므로, 이후 이 사용자의 일반 메시지는 시작 안내(M8)로
+        //   흡수하지 않고 webhook 으로 전달해야 한다.
+        //   발송이 실패한 경우(502)는 표시하지 않는다 — 사용자는 아무것도 받지 못했으므로
+        //   답변할 것이 없고, 표시해 두면 무관한 메시지가 webhook 으로 새어 나간다.
+        OUTBOUND.context.mark(userId);
         res.send(`사용자 ${userId}에게 메시지를 보냈습니다.`);
     } catch (err) {
         console.error(`[${new Date().toLocaleString()}] 엔드포인트 에러:`, err);
