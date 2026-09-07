@@ -29,7 +29,10 @@ const mode = {
     token: 'ok',
     startJob: 'ok',
     jobState: 'ok',
-    stopJob: 'ok'
+    stopJob: 'ok',
+    // 'fail' 이면 대화 생성이 500 을 돌려준다 → createConversationAndSendMessage 가
+    // false 를 반환하고 /api/sendMessage 는 502 가 된다. H-12 가 이 경로를 쓴다.
+    teams: 'ok'
 };
 
 // 다음 StartJobs 가 돌려줄 Job ID
@@ -163,6 +166,10 @@ const server = http.createServer(async (req, res) => {
     // ── 4) Bot Framework Connector (봇 → 사용자) ──────────────
     //   대화 생성
     if (url === '/teams/v3/conversations' && req.method === 'POST') {
+        if (mode.teams === 'fail') {
+            log('createConversation → 500 (mode.teams=fail)');
+            return json(res, 500, { error: 'teams down' });
+        }
         const id = 'conv-' + Date.now();
         log(`createConversation → ${id}`);
         return json(res, 200, { id, activityId: 'act-1' });

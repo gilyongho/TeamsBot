@@ -287,6 +287,13 @@ class TeamsApp extends TeamsActivityHandler {
                 await app.createConversationAndSendMessage(userInfo.id, appMessage8);
 
             } else {
+                // [J-7 보완] 어느 근거로 전달하는지 로그에 남긴다. 이것이 없으면
+                //   운영에서 예외가 실제로 발동했는지 확인할 방법이 없다.
+                if (!JOBTABLE.table.hasJob(userInfo.id)) {
+                    console.log(
+                        `[${new Date().toLocaleString()}] 외부 시스템이 시작한 대화의 답변으로 전달합니다. ` +
+                        `사용자 '${userInfo.id}'`);
+                }
                 // 메시지 큐에 메시지 추가
                 MSGQUEUE.msgQueue.enqueue(userInfo.id, cleanText);
             }

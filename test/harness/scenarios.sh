@@ -280,5 +280,30 @@ msgs | grep -q "진행 중인 대화가 없습니다" \
   && ok "시작 안내를 받음" \
   || no "시작 안내 없음" "$(msgs | tr '\n' '|')"
 
+# ── H-12 : 발송이 실패했으면 맥락을 표시하지 않아야 한다 ─────
+hdr 'H-12 sendMessage 실패(502) → 맥락 표시 안 함 → 답변은 M8  ← 의도한 설계'
+# 발송이 실패했으면 사용자는 아무것도 받지 못했으므로 답변할 것이 없다. 그런데도
+# 맥락을 표시해 두면, 그 사용자의 무관한 메시지가 TTL 동안 webhook 으로 새어 나간다.
+U12=aad-user-h12-$RUN_ID
+clear_state
+say "안녕" "$U12" >/dev/null; sleep 2          # conversationReference 를 채운다
+ctl '{"teams":"fail"}'                          # Teams 발송이 죽는다
+code=$(sendmsg "인증 코드를 입력해 주세요" "$U12")
+ctl '{"teams":"ok"}'
+if [ "$code" != "502" ]; then
+  no "전제 실패 — 발송 실패인데 502 가 아님" "HTTP $code"
+else
+  ok "전제: 발송 실패 시 502"
+  clear_state
+  say "483920" "$U12"; sleep 3
+  n12=$(count webhook)
+  [ "${n12:-0}" = "0" ] \
+    && ok "webhook 으로 보내지 않음 (실패한 발송은 맥락이 아님)" \
+    || no "webhook 발송됨 — 무관한 메시지가 새어 나감" "${n12}회"
+  msgs | grep -q "진행 중인 대화가 없습니다" \
+    && ok "시작 안내(M8)를 받음" \
+    || no "M8 없음" "$(msgs | tr '\n' '|')"
+fi
+
 printf '\n\033[1m결과: %d 통과 / %d 실패\033[0m\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
