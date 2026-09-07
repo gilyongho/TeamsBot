@@ -12,6 +12,9 @@
 //   - 잘못된 TTL 값으로 판정이 조용히 뒤집히지 않는다.
 //
 // 실행:  npm test        (사전 준비 없음. 네트워크·인증서·포트를 쓰지 않는다)
+//
+// 시간에 의존하는 검사는 마진을 200ms 이상 둔다. TTL 에 바짝 붙여 놓으면 부하가
+// 걸린 CI 에서 간헐적으로 실패하고, 그 실패는 코드 결함으로 오인된다.
 //------------------------------------------------
 
 const path = require('path');
@@ -51,10 +54,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
     // ── 3. TTL 만료 ──────────────────────────────────────────────────
     {
-        const c = new OutboundContext(80);
+        const c = new OutboundContext(250);
         c.mark('u1');
         check('만료 전에는 맥락 있음', c.has('u1') === true);
-        await sleep(140);
+        await sleep(450);                   // TTL 250 + 마진 200
         check('TTL 경과 후 맥락 없음', c.has('u1') === false);
         check('읽는 김에 항목이 정리됨', c.size() === 0, `실제 ${c.size()}`);
     }
@@ -62,21 +65,21 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     // ── 4. 재표시로 TTL 이 갱신된다 ──────────────────────────────────
     //   다회 문답 구성에서 매 발송마다 창이 다시 열려야 한다.
     {
-        const c = new OutboundContext(120);
+        const c = new OutboundContext(500);
         c.mark('u1');
-        await sleep(80);
+        await sleep(300);
         c.mark('u1');                       // 다시 발송
-        await sleep(80);                    // 첫 표시로부터 160ms — 갱신이 없으면 만료
-        check('재표시로 TTL 갱신됨', c.has('u1') === true);
+        await sleep(300);                   // 첫 표시로부터 600ms(>500) — 갱신이 없으면 만료
+        check('재표시로 TTL 갱신됨', c.has('u1') === true);   // 재표시로부터 300ms, 마진 200
     }
 
     // ── 5. sweep() — 다시 읽히지 않는 항목도 정리된다 ────────────────
     //   has() 는 읽은 항목만 정리하므로, 이것이 없으면 표가 무한히 자란다.
     {
-        const c = new OutboundContext(60);
+        const c = new OutboundContext(200);
         for (let i = 0; i < 50; i++) c.mark(`u${i}`);
         check('표 크기 50', c.size() === 50, `실제 ${c.size()}`);
-        await sleep(120);
+        await sleep(400);                   // TTL 200 + 마진 200
         const removed = c.sweep();
         check('sweep() 이 만료 항목 50건 제거', removed === 50, `실제 ${removed}`);
         check('sweep() 후 표 크기 0', c.size() === 0, `실제 ${c.size()}`);
