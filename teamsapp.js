@@ -8,6 +8,7 @@ const MSGQUEUE = require('./msgqueue');
 const PROCQUEUE = require('./procqueue')
 const JOBTABLE = require('./jobtable')
 const OUTBOUND = require('./outboundcontext')
+const CONVREF = require('./convrefstore')
 
 // 필요한 패키지: npm install botbuilder restify dotenv @microsoft/microsoft-graph-client
 require('dotenv').config();
@@ -120,6 +121,15 @@ const maxStateCheckRetry = numEnv('MaxStateCheckRetry', 3);
 //   webhook 으로 나가는 창이 넓어진다.
 const OUTBOUND_CONTEXT_TTL_MS = numEnv('OutboundContextTtlMs', OUTBOUND.DEFAULT_TTL_MS, 1000);
 OUTBOUND.context.configure(OUTBOUND_CONTEXT_TTL_MS);
+
+// 보관한 대화 참조를 재사용할지. 기본은 재사용한다.
+//   'false' 로 두면 발송마다 createConversation 을 호출하던 종전 동작으로 돌아간다.
+//   되돌리는 데 배포가 필요 없어야 하므로 코드가 아니라 설정으로 둔다.
+const REUSE_CONVERSATION = String(process.env.ReuseConversation || 'true').toLowerCase() !== 'false';
+if (!REUSE_CONVERSATION) {
+    console.log(`[${new Date().toLocaleString()}] ⚠️ ReuseConversation=false — ` +
+        `발송마다 대화를 새로 만듭니다(종전 동작).`);
+}
 
 // 다시 읽히지 않는 항목은 has() 로 정리되지 않으므로 주기적으로 비운다.
 //   unref() 로 이 타이머가 프로세스 생존을 붙잡지 않게 한다.
@@ -236,6 +246,14 @@ class TeamsApp extends TeamsActivityHandler {
             
             // 대화 참조 정보 저장
             this.conversationReference = TurnContext.getConversationReference(context.activity);
+
+            // 같은 참조를 보낸 사람 앞으로도 보관한다.
+            //   위의 this.conversationReference 는 프로세스에 하나뿐이라, 마지막으로
+            //   말을 건 사람의 것으로 계속 덮어씌워진다. 그 사람이 아닌 다른 사람에게
+            //   보낼 때는 쓸 수 없다. 사용자별로 따로 두어야 재사용이 성립한다.
+            //   키는 발송에 쓰는 식별자와 같아야 한다 — createConversationAndSendMessage
+            //   의 userId 는 AAD Object ID 이므로 여기서도 aadObjectId 를 쓴다.
+            this.rememberConversationReference(context.activity);
             //console.log(`AAD Object ID: '${context.activity.from.aadObjectId}'`);
 
             // Get user info
@@ -409,7 +427,60 @@ class TeamsApp extends TeamsActivityHandler {
         );
     }
 
+    // 들어온 활동에서 대화 참조를 꺼내 보낸 사람 앞으로 보관한다.
+    //   aadObjectId 가 없는 활동(일부 채널·시스템 활동)은 보관하지 않는다.
+    //   발송 키와 다른 키로 담으면 영원히 조회되지 않는 항목이 쌓일 뿐이다.
+    rememberConversationReference(activity) {
+        if (!REUSE_CONVERSATION) return false;
+        try {
+            const userId = activity && activity.from && activity.from.aadObjectId;
+            if (!userId) return false;
+            const ref = TurnContext.getConversationReference(activity);
+            return CONVREF.store.set(userId, ref);
+        } catch (error) {
+            // 보관 실패가 대화를 막아서는 안 된다. 없으면 종전 경로로 간다.
+            console.error(`[${new Date().toLocaleString()}] ⚠️ 대화 참조 보관 실패: ${error.message}`);
+            return false;
+        }
+    }
+
+    // 사용자에게 보낸다.
+    //
+    //   1순위: 보관해 둔 대화 참조로 바로 보낸다. createConversation 을 부르지 않는다.
+    //   2순위: 보관분이 없거나 그것으로 보내다 실패하면, 보관분을 버리고
+    //          종전처럼 createConversation 으로 대화를 만들어 보낸 뒤 그 참조를 보관한다.
+    //
+    //   2순위가 반드시 있어야 한다. 참조는 serviceUrl 변경·대화 삭제로 오래되면
+    //   쓸 수 없게 되는데, 그때 폴백이 없으면 재사용을 넣은 쪽이 더 나빠진다.
     async createConversationAndContinue(userId, callback) {
+        // ── 1순위: 보관분 재사용 ──────────────────────────────
+        if (REUSE_CONVERSATION) {
+            const cached = CONVREF.store.get(userId);
+            if (cached) {
+                try {
+                    await adapter.continueConversationAsync(appId, cached, callback);
+                    return;
+                } catch (error) {
+                    // 오래된 참조로 판단하고 버린다. 그대로 두면 매번 실패 후 폴백이라
+                    // 호출이 두 배가 된다.
+                    CONVREF.store.delete(userId);
+                    console.error(
+                        `[${new Date().toLocaleString()}] ⚠️ 보관한 대화 참조로 보내지 못했습니다. ` +
+                        `참조를 버리고 대화를 다시 만듭니다: ${error.message}`);
+                }
+            }
+        }
+
+        // ── 2순위: 종전 경로 (대화 생성) ──────────────────────
+        //   여기서만 this.conversationReference 가 필요하다. 재시작 직후 아무도 봇에게
+        //   말을 걸지 않았으면 비어 있는데, 종전에는 그 상태에서 TypeError 가 났다.
+        //   원인을 알아볼 수 있는 메시지로 바꾼다.
+        if (!this.conversationReference) {
+            throw new Error(
+                '대화 참조 정보가 없어 대화를 만들 수 없습니다. ' +
+                '재시작 후 아무도 봇에게 메시지를 보내지 않았습니다.');
+        }
+
         const appCredentials = new MicrosoftAppCredentials(
             appId,
             appPassword,
@@ -451,6 +522,11 @@ class TeamsApp extends TeamsActivityHandler {
                 id: userId
             }
         };
+
+        // 만든 참조를 보관한다. 다음 발송부터는 1순위 경로로 간다.
+        //   보내기 전에 담는다. 여기서 실패하더라도 그 실패는 대화 생성이 아니라
+        //   전송 단계의 것이고, 참조 자체는 유효하기 때문이다.
+        if (REUSE_CONVERSATION) CONVREF.store.set(userId, convRef);
 
         await adapter.continueConversationAsync(appId, convRef, callback);
     }

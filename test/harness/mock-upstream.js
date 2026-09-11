@@ -30,9 +30,13 @@ const mode = {
     startJob: 'ok',
     jobState: 'ok',
     stopJob: 'ok',
-    // 'fail' 이면 대화 생성이 500 을 돌려준다 → createConversationAndSendMessage 가
-    // false 를 반환하고 /api/sendMessage 는 502 가 된다. H-12 가 이 경로를 쓴다.
-    teams: 'ok'
+    // 'fail'      : 대화 생성이 500 을 돌려준다 → createConversationAndSendMessage 가
+    //               false 를 반환하고 /api/sendMessage 는 502 가 된다. H-12 가 이 경로를 쓴다.
+    // 'forbidden' : 운영에서 관측된 403 "Bot is not installed in user's personal scope"
+    //               를 대화 생성 단계에서 재현한다. 본문이 비어 있는 것까지 같다.
+    teams: 'ok',
+    // 대화 id 를 넣으면 그 대화로의 활동 전송이 403 이 된다 (오래된 참조 흉내).
+    staleConv: ''
 };
 
 // 다음 StartJobs 가 돌려줄 Job ID
@@ -48,7 +52,10 @@ const seen = {
     startJob: [],
     stopJob: [],
     jobState: [],
-    botMessages: []     // 봇이 사용자에게 보낸 메시지
+    botMessages: [],    // 봇이 사용자에게 보낸 메시지
+    // 대화 생성 호출. 대화 재사용이 동작하는지 보려면 "보낸 메시지 수" 가 아니라
+    // "대화를 몇 번 만들었는가" 를 세야 한다.
+    createConversation: []
 };
 
 const log = (...a) => console.log(`[mock ${new Date().toISOString().slice(11, 19)}]`, ...a);
@@ -166,22 +173,43 @@ const server = http.createServer(async (req, res) => {
     // ── 4) Bot Framework Connector (봇 → 사용자) ──────────────
     //   대화 생성
     if (url === '/teams/v3/conversations' && req.method === 'POST') {
+        const member = ((body.members || [])[0] || {}).id || '';
+        seen.createConversation.push({ at: Date.now(), member });
+
         if (mode.teams === 'fail') {
             log('createConversation → 500 (mode.teams=fail)');
             return json(res, 500, { error: 'teams down' });
         }
-        const id = 'conv-' + Date.now();
-        log(`createConversation → ${id}`);
+        // 운영에서 관측된 실패를 그대로 재현한다. 응답 본문이 비어 있는 것까지 같다.
+        if (mode.teams === 'forbidden') {
+            log(`createConversation → 403 (mode.teams=forbidden)  member=${member}`);
+            res.writeHead(403, {
+                'content-type': 'application/json',
+                'x-ms-diagnostics': "3000001;reason=\"Bot is not installed in user's personal scope\""
+            });
+            return res.end('');
+        }
+        const id = 'conv-' + (seen.createConversation.length) + '-' + Date.now();
+        log(`createConversation → ${id}  member=${member}`);
         return json(res, 200, { id, activityId: 'act-1' });
     }
     //   활동(메시지) 전송
     const actMatch = url.match(/^\/teams\/v3\/conversations\/([^/]+)\/activities/);
     if (actMatch && req.method === 'POST') {
+        // 오래된 대화 참조를 흉내낸다. 이 대화로 보내려 하면 거부한다.
+        //   재사용이 실패했을 때 앱이 참조를 버리고 createConversation 으로
+        //   되돌아가는지 보기 위한 것이다. 폴백이 없으면 여기서 발송이 끝난다.
+        if (mode.staleConv && actMatch[1] === mode.staleConv) {
+            log(`봇 → 사용자: [${actMatch[1]}] → 403 (오래된 참조)`);
+            res.writeHead(403, { 'content-type': 'application/json' });
+            return res.end('');
+        }
         if (body.type === 'typing') {
             return json(res, 200, { id: 'act-typing' });
         }
-        seen.botMessages.push({ at: Date.now(), text: body.text });
-        log(`봇 → 사용자:  ${String(body.text || '').replace(/<br>/g, ' ').slice(0, 90)}`);
+        // 어느 대화로 나갔는지 함께 기록한다. 재사용이면 같은 대화 id 가 반복된다.
+        seen.botMessages.push({ at: Date.now(), text: body.text, conversationId: actMatch[1] });
+        log(`봇 → 사용자:  [${actMatch[1]}] ${String(body.text || '').replace(/<br>/g, ' ').slice(0, 80)}`);
         return json(res, 200, { id: 'act-' + Date.now() });
     }
 

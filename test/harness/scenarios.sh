@@ -287,9 +287,15 @@ hdr 'H-12 sendMessage 실패(502) → 맥락 표시 안 함 → 답변은 M8  �
 U12=aad-user-h12-$RUN_ID
 clear_state
 say "안녕" "$U12" >/dev/null; sleep 2          # conversationReference 를 채운다
-ctl '{"teams":"fail"}'                          # Teams 발송이 죽는다
+# Teams 발송이 죽는다.
+#   대화 재사용이 들어온 뒤로는 대화 생성만 막아서는 발송이 실패하지 않는다.
+#   보관해 둔 참조로 그대로 나가기 때문이다(그것이 재사용의 목적이다).
+#   이 시나리오가 보려는 것은 "실패했을 때의 동작" 이므로, 두 경로를 모두 막는다.
+ctl '{"teams":"fail"}'                          # ① 대화 생성 실패
+ctl "{\"staleConv\":\"c-$U12\"}"                # ② 보관한 참조로도 못 보냄
 code=$(sendmsg "인증 코드를 입력해 주세요" "$U12")
 ctl '{"teams":"ok"}'
+ctl '{"staleConv":""}'
 if [ "$code" != "502" ]; then
   no "전제 실패 — 발송 실패인데 502 가 아님" "HTTP $code"
 else

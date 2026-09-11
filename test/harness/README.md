@@ -351,3 +351,38 @@ OS 동작이 아니라 애플리케이션 로직을 보는 도구이므로, macO
 
 `cloud-check.sh` 는 `cloud.uipath.com` 으로 나가야 하므로, 사내망에서 TLS 검사
 프록시에 걸리면 Codespaces 쪽이 더 수월하다.
+
+## 대화 재사용 검증 (reuse.sh)
+
+발송마다 `createConversation` 을 호출하던 것을, 보관해 둔 대화 참조 재사용으로
+바꾼 부분을 확인합니다. **세는 것은 "보낸 메시지 수" 가 아니라 "대화를 몇 번
+만들었는가"** 입니다.
+
+```bash
+bash test/harness/reuse.sh                          # 재사용 (기본)
+ReuseConversation=false bash test/harness/reuse.sh  # 종전 동작과 비교
+```
+
+두 번째는 앱도 같은 설정으로 기동해야 합니다.
+
+```bash
+ReuseConversation=false node main.js > /tmp/app-old.log 2>&1 &
+```
+
+| 시나리오 | 보는 것 |
+|---|---|
+| R-1 | 대화가 있는 사람에게 3회 발송 → 대화 생성 **0회** (종전 3회) |
+| R-2 | 첫 접촉은 1회 생성, 이후는 생성 없음 |
+| R-3 | 보관한 참조가 못 쓰게 되면 버리고 다시 만들어 보냄 (폴백) |
+| R-4 | 대화 생성이 403 이면 200 으로 숨기지 않고 502 |
+
+mock 에 추가된 제어:
+
+```bash
+curl -s localhost:19000/__control -d '{"teams":"forbidden"}' -H 'content-type: application/json'
+curl -s localhost:19000/__control -d '{"staleConv":"c-aad-1"}' -H 'content-type: application/json'
+```
+
+`forbidden` 은 운영에서 관측된 403 `Bot is not installed in user's personal scope`
+를 대화 생성 단계에서 재현하고, `staleConv` 는 그 대화로의 전송만 403 으로 만들어
+**오래된 참조**를 흉내냅니다.
