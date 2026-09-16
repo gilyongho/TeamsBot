@@ -319,22 +319,35 @@ class TeamsApp extends TeamsActivityHandler {
     //   2순위가 반드시 있어야 한다. 참조는 serviceUrl 변경·대화 삭제로 오래되면
     //   쓸 수 없게 되는데, 그때 폴백이 없으면 재사용을 넣은 쪽이 더 나빠진다.
     async createConversationAndContinue(userId, callback) {
+        // 어느 경로로 갔는지 로그에 남긴다.
+        //   반영 뒤 403 이 남아 있을 때, "고쳤는데도 안 낫는 것" 인지 "재사용이 애초에
+        //   동작하지 않은 것" 인지 구분할 수 있어야 한다. 이 두 줄이 그 판별의 근거다.
+        //   집계:  grep -c "대화 재사용"     → 재사용 발송 횟수
+        //          grep -c "대화 생성 시도"  → createConversation 호출 횟수 (성패 무관)
+        let createReason = '보관분 없음';
+
         // ── 1순위: 보관분 재사용 ──────────────────────────────
         if (reuseConversation) {
             const cached = CONVREF.store.get(userId);
             if (cached) {
                 try {
                     await adapter.continueConversationAsync(appId, cached, callback);
+                    console.log(
+                        `[${new Date().toLocaleString()}] 대화 재사용: 사용자 '${userId}' ` +
+                        `(보관한 대화로 발송, 대화 생성 안 함)`);
                     return;
                 } catch (error) {
                     // 오래된 참조로 판단하고 버린다. 그대로 두면 매번 실패 후 폴백이라
                     // 호출이 두 배가 된다.
                     CONVREF.store.delete(userId);
+                    createReason = '재사용 실패 후 재생성';
                     console.error(
                         `[${new Date().toLocaleString()}] ⚠️ 보관한 대화 참조로 보내지 못했습니다. ` +
                         `참조를 버리고 대화를 다시 만듭니다: ${error.message}`);
                 }
             }
+        } else {
+            createReason = '재사용 꺼짐(ReuseConversation=false)';
         }
 
         // ── 2순위: 종전 경로 (대화 생성) ──────────────────────
@@ -373,6 +386,10 @@ class TeamsApp extends TeamsActivityHandler {
                 }
             ]
         };
+
+        // 호출 직전에 남긴다. 403 으로 거부되어도 "시도했다" 는 사실이 남아야 한다.
+        console.log(
+            `[${new Date().toLocaleString()}] 대화 생성 시도: 사용자 '${userId}' (${createReason})`);
 
         const response = await connectorClient.conversations.createConversation(conversationParameters);
 
